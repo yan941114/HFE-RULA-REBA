@@ -209,8 +209,12 @@ class BatchEvaluator:
         self.analyzer = PoseAnalyzer(model_path=model_path)
 
     def process_image(self, img_path: str) -> Optional[Dict[str, Any]]:
-        """處理單張影像並輸出結果與標註圖"""
-        img = cv2.imread(img_path)
+        """處理單張影像並輸出結果與標註圖 (支援中文路徑與檔名)"""
+        try:
+            img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception:
+            img = cv2.imread(img_path)
+
         if img is None:
             return None
 
@@ -226,9 +230,13 @@ class BatchEvaluator:
         fname = os.path.basename(img_path)
         annotated = res["annotated_image"]
 
-        # 儲存標註圖
+        # 儲存標註圖 (支援中文路徑)
         save_img_path = os.path.join(self.output_dir, f"annotated_{fname}")
-        cv2.imwrite(save_img_path, annotated)
+        ext = os.path.splitext(fname)[1] or ".jpg"
+        try:
+            cv2.imencode(ext, annotated)[1].tofile(save_img_path)
+        except Exception:
+            cv2.imwrite(save_img_path, annotated)
 
         flat = res["flattened"]
         record = {
@@ -359,15 +367,27 @@ def main():
 
     # 專家環境參數 (Manual Modifiers)
     parser.add_argument("--load-kg", type=float, default=0.0, help="負重重量 (kg)")
+    parser.add_argument("--load-shock", action="store_true", help="是否有瞬間衝擊或急劇施力")
     parser.add_argument("--muscle-use", type=int, default=0, choices=[0, 1], help="RULA 肌肉重複或靜態使用 (0 或 1)")
     parser.add_argument("--coupling", type=int, default=0, choices=[0, 1, 2, 3], help="REBA 抓握品質評分 (0:良, 1:可, 2:差, 3:危險)")
 
     args = parser.parse_args()
 
+    # RULA Force/Load Score (0~3) 標準轉換邏輯
+    if args.load_kg < 2.0:
+        rula_force = 0
+    elif args.load_kg <= 10.0:
+        rula_force = 2 if (args.muscle_use or args.load_shock) else 1
+    else:
+        rula_force = 3 if (args.muscle_use or args.load_shock) else 2
+
     modifiers = {
         "load_weight_kg": args.load_kg,
+        "load_rapid_shock": args.load_shock,
         "muscle_use_a": args.muscle_use,
         "muscle_use_b": args.muscle_use,
+        "force_load_a": rula_force,
+        "force_load_b": rula_force,
         "coupling_score": args.coupling,
     }
 

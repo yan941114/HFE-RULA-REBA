@@ -171,14 +171,22 @@ with st.sidebar.expander("進階姿態補正項 (進一步微調)", expanded=Fal
     neck_side_bending = st.checkbox("頸部側彎 (+1)")
     legs_supported = st.checkbox("雙腳支撐良好且平衡", value=True)
 
+# RULA Force/Load Score (0~3) 標準轉換邏輯
+if load_kg < 2.0:
+    rula_force = 0
+elif load_kg <= 10.0:
+    rula_force = 2 if (act_static or act_repeat or load_shock) else 1
+else:
+    rula_force = 3 if (act_static or act_repeat or load_shock) else 2
+
 # 整合 modifiers 字典
 manual_modifiers = {
     "load_weight_kg": load_kg,
     "load_rapid_shock": load_shock,
     "muscle_use_a": 1 if (act_static or act_repeat) else 0,
     "muscle_use_b": 1 if (act_static or act_repeat) else 0,
-    "force_load_a": 0 if load_kg < 2.0 else (1 if load_kg <= 10.0 and not act_repeat else (2 if load_kg <= 10.0 else 3)),
-    "force_load_b": 0 if load_kg < 2.0 else (1 if load_kg <= 10.0 and not act_repeat else (2 if load_kg <= 10.0 else 3)),
+    "force_load_a": rula_force,
+    "force_load_b": rula_force,
     "activity_static": act_static,
     "activity_repeated": act_repeat,
     "activity_rapid": act_rapid,
@@ -188,6 +196,7 @@ manual_modifiers = {
     "arm_supported": arm_supported,
     "wrist_deviated": wrist_deviated,
     "wrist_twist": wrist_twist,
+    "wrist_twisted": (wrist_twist == 2),  # 支援 REBA 布林格式連動
     "trunk_twisted": trunk_twisted,
     "trunk_side_bending": trunk_side_bending,
     "neck_twisted": neck_twisted,
@@ -299,6 +308,7 @@ with tab_video:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         tfile.write(uploaded_video.read())
         tfile_path = tfile.name
+        tfile.close()  # 立即關閉檔案控制代碼，防止 Windows 檔案鎖定衝突
 
         col_vbtn, col_vstatus = st.columns([1, 3])
         with col_vbtn:
