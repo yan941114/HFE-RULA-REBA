@@ -58,9 +58,12 @@
   - [x] 資料夾批次處理，一鍵分析所有照片與影片
   - [x] 匯出包含預測角度、子分數、總分、影片最高危害時長佔比之 CSV
   - [x] 對接期末專題研究：自動計算 MAE、RMSE、評分一致率與線性加權 Cohen's Kappa 係數
-- [ ] **階段四：可互動 Web APP 介面 (`app.py`)**
-  - [ ] 支援照片/影片上傳與即時看板
-  - [ ] 整合快取機制與人機微調控制 (Human-in-the-loop)
+- [x] **階段四：可互動 Web APP 介面 (`app.py`)**
+  - [x] Streamlit 現代化儀表板，支援照片與影片即時上傳預覽
+  - [x] 骨架疊圖與綠/黃/橘/紅即時風險變色看板
+  - [x] 整合 State 快取機制與短路純重算 (調參免重跑 YOLO，毫秒級即時更新)
+  - [x] 影片時序風險折線圖與最高危害瞬間 (Peak Hazard Frame) 捕捉
+  - [x] 專題批次數據與 Ground Truth (Kappa / MAE) 學術驗證分頁
 
 ---
 
@@ -72,7 +75,14 @@
 conda activate pose
 ```
 
-### 2. 執行單元測試
+### 2. 啟動互動式 Web APP 系統 (Streamlit)
+執行以下指令即可開啟瀏覽器操作介面：
+```powershell
+streamlit run app.py
+```
+> 系統將自動於本機瀏覽器開啟 `http://localhost:8501`。
+
+### 3. 執行單元測試
 驗證所有演算法模組是否運作正常：
 ```powershell
 python tests/test_rula_reba.py
@@ -80,7 +90,7 @@ python tests/test_pose_analyzer.py
 python tests/test_batch_evaluator.py
 ```
 
-### 3. 專題批次資料夾評估
+### 4. 專題批次資料夾評估
 指定含有測試照片/影片的資料夾進行批次分析：
 ```powershell
 python batch_evaluator.py --input-dir "你的測試資料夾路徑" --method RULA --output-dir outputs
