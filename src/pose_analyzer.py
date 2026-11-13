@@ -173,17 +173,29 @@ class PoseAnalyzer:
     def estimate_facing_direction(self, xy: np.ndarray, conf: np.ndarray) -> str:
         """
         推估作業人員在畫面中的面向方向 ('right', 'left', 或 'frontal')
-        利用 鼻子 vs 雙耳 / 雙肩 的水平 x 座標位移判定
+        使用人體自身軀幹長度 (trunk_len) 進行尺度無關 (Scale-Invariant) 正規化
         """
         nose = xy[KP_NOSE]
         l_ear, r_ear = xy[KP_L_EAR], xy[KP_R_EAR]
         l_sh, r_sh = xy[KP_L_SHOULDER], xy[KP_R_SHOULDER]
+        l_hip, r_hip = xy[KP_L_HIP], xy[KP_R_HIP]
+
+        # 估算軀幹長度作為自適應尺度基準
+        sh_mid = (l_sh + r_sh) / 2.0
+        pelvis = (l_hip + r_hip) / 2.0
+        trunk_len = float(np.linalg.norm(sh_mid - pelvis))
+        if trunk_len < 1e-3:
+            trunk_len = 100.0  # 防除以零保護
+
+        # 尺度無關動態閾值 (取代原先固定像素值)
+        dx_thresh = 0.08 * trunk_len
+        shoulder_w_thresh = 0.35 * trunk_len
 
         # 參考耳部或肩部中點
         ref_x = 0.0
         valid_refs = 0
         if conf[KP_L_SHOULDER] >= self.conf_thres and conf[KP_R_SHOULDER] >= self.conf_thres:
-            ref_x = (l_sh[0] + r_sh[0]) / 2.0
+            ref_x = sh_mid[0]
             valid_refs += 1
         elif conf[KP_L_EAR] >= self.conf_thres and conf[KP_R_EAR] >= self.conf_thres:
             ref_x = (l_ear[0] + r_ear[0]) / 2.0
@@ -191,14 +203,14 @@ class PoseAnalyzer:
 
         if valid_refs > 0 and conf[KP_NOSE] >= self.conf_thres:
             dx = nose[0] - ref_x
-            if dx > 15.0:
+            if dx > dx_thresh:
                 return "right"
-            elif dx < -15.0:
+            elif dx < -dx_thresh:
                 return "left"
 
-        # 若雙肩寬度大於一定比例且鼻子在中間，判定為正面
+        # 若雙肩寬度大於比例且鼻子在中間，判定為正面
         shoulder_w = abs(r_sh[0] - l_sh[0])
-        if shoulder_w > 40.0:
+        if shoulder_w > shoulder_w_thresh:
             return "frontal"
 
         return "right"  # 預設面向右側
@@ -262,27 +274,31 @@ class PoseAnalyzer:
         if conf[KP_NOSE] < self.conf_thres:
             head_pt = midpoint(xy[KP_L_EAR], xy[KP_R_EAR])
         v_neck = head_pt - shoulder_mid
-        neck_mag = angle_between_vectors(v_neck, v_up) or 0.0
-        # 頸部相對軀幹之夾角
         neck_relative = angle_between_vectors(v_neck, v_trunk) or 0.0
-        neck_dx = (head_pt[0] - shoulder_mid[0]) * fwd_sign
-        neck_angle = neck_relative if neck_dx >= 0 else -neck_relative
+
+        # 利用 2D 外積 (Cross Product) 判斷相對旋轉方向，不受大角度彎腰影響
+        # 影像座標系 (X向右, Y向下)：當面向右側 (fwd_sign > 0) 時，
+        # 向量順時針旋轉 (前屈 Flexion) 的 2D cross (ref_x * v_y - ref_y * v_x) 為正值
+        cross_neck = (v_trunk[0] * v_neck[1] - v_trunk[1] * v_neck[0]) * fwd_sign
+        neck_angle = neck_relative if cross_neck >= 0 else -neck_relative
 
         # 3. 上臂屈伸 (Upper Arm Flexion/Extension)
-        # 向量: 肩膀 -> 手肘
+        # 向量: 肩膀 -> 手肘，參考軀幹向下方向 (v_trunk_down)
         v_upper_arm = xy[el_idx] - xy[sh_idx]
-        # 參考軀幹向下方向
         v_trunk_down = -v_trunk
         ua_mag = angle_between_vectors(v_upper_arm, v_trunk_down) or 0.0
-        ua_dx = (xy[el_idx][0] - xy[sh_idx][0]) * fwd_sign
-        upper_arm_angle = ua_mag if ua_dx >= 0 else -ua_mag
+
+        # 上臂向前抬起時，相對於向下的軀幹向量是逆時針旋轉，加負號使前屈為正
+        cross_ua = -(v_trunk_down[0] * v_upper_arm[1] - v_trunk_down[1] * v_upper_arm[0]) * fwd_sign
+        upper_arm_angle = ua_mag if cross_ua >= 0 else -ua_mag
 
         # 4. 前臂屈曲 (Lower Arm Angle / Elbow Flexion)
-        # 向量: 手肘 -> 手腕 與 手肘 -> 肩膀
-        v_forearm = xy[wr_idx] - xy[el_idx]
-        v_arm_reverse = xy[sh_idx] - xy[el_idx]
-        elbow_angle = angle_between_vectors(v_forearm, v_arm_reverse)
-        lower_arm_angle = elbow_angle if elbow_angle is not None else 90.0
+        # 基準：計算上臂延伸方向 (肩膀 -> 手肘) 與前臂向量 (手肘 -> 手腕) 之屈曲角
+        # 手臂完全伸直為 0° (在 RULA/REBA 得 2 分)；手肘彎曲成直角為 90° (在 60°~100° 區間得 1 分)
+        v_upper_ext = xy[el_idx] - xy[sh_idx]  # 肩膀指向手肘 (0度伸展基準)
+        v_forearm = xy[wr_idx] - xy[el_idx]    # 手肘指向手腕
+        elbow_flexion = angle_between_vectors(v_forearm, v_upper_ext)
+        lower_arm_angle = elbow_flexion if elbow_flexion is not None else 90.0
 
         # 5. 手腕角度 (Wrist Angle)
         # 由於 COCO-17 僅標註到手腕點，手腕屈曲若無法精準辨識則預設為接近中立位 (0°)
@@ -514,6 +530,7 @@ class PoseAnalyzer:
                         "score": score,
                         "action_level": level,
                         "side_used": side_used,
+                        "raw_angles": angles.copy(),
                         **flatten_assessment_result(res)
                     }
                     frame_records.append(rec)
@@ -557,23 +574,97 @@ class PoseAnalyzer:
             "time_series_records": frame_records
         }
 
+    @staticmethod
+    def recalculate_video_scores(time_series_records: List[Dict[str, Any]],
+                                 method: str = "RULA",
+                                 manual_modifiers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        為前端 Web GUI 提供「極速短路純重算」接口：
+        當使用者在介面上修改負重、支撐、活動性質時，
+        直接透過此函式在幾毫秒內重新計算所有影格分數，絕不重跑 YOLO 推論！
+        """
+        updated_records = []
+        peak_score = -1
+        peak_frame_record = None
+
+        level_counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
+
+        for r in time_series_records:
+            angles = r.get("raw_angles", {
+                "trunk": r.get("trunk_angle", 0.0),
+                "neck": r.get("neck_angle", 0.0),
+                "upper_arm": r.get("upper_arm_angle", 0.0),
+                "lower_arm": r.get("lower_arm_angle", 90.0),
+                "wrist": r.get("wrist_angle", 0.0),
+                "knee": r.get("knee_angle", 0.0)
+            })
+
+            if method.upper() == "REBA":
+                res = calculate_reba(angles, manual_modifiers)
+                score = res["final_reba_score"]
+                level = res["action_level"]
+            else:
+                res = calculate_rula(angles, manual_modifiers)
+                score = res["grand_score"]
+                level = res["action_level"]
+
+            flat = flatten_assessment_result(res)
+            new_r = {
+                "frame_index": r["frame_index"],
+                "timestamp_sec": r["timestamp_sec"],
+                "score": score,
+                "action_level": level,
+                "side_used": r.get("side_used", "auto"),
+                "raw_angles": angles,
+                **flat
+            }
+            updated_records.append(new_r)
+
+            level_counts[level] = level_counts.get(level, 0) + 1
+            if score > peak_score:
+                peak_score = score
+                peak_frame_record = new_r
+
+        total_frames = len(updated_records)
+        level_percentages = {
+            f"AL_{lvl}": round((cnt / total_frames) * 100.0, 1) if total_frames > 0 else 0.0
+            for lvl, cnt in level_counts.items()
+        }
+        high_risk_pct = round(((level_counts.get(3, 0) + level_counts.get(4, 0)) / max(1, total_frames)) * 100.0, 1)
+
+        return {
+            "peak_risk_score": peak_score,
+            "peak_risk_record": peak_frame_record,
+            "risk_distribution_pct": level_percentages,
+            "high_risk_exposure_pct": high_risk_pct,
+            "time_series_records": updated_records
+        }
+
 
 # ==============================================================================
 # 自我測試入口
 # ==============================================================================
 if __name__ == "__main__":
-    print("=== Testing PoseAnalyzer on Sample Image ===")
-    test_img_path = "六人合照_姓名標示.png"
-    if os.path.exists(test_img_path):
-        analyzer = PoseAnalyzer()
-        img = cv2.imread(test_img_path)
-        res = analyzer.analyze_image(img, side="auto", method="RULA")
-        if res:
-            print(f"RULA Grand Score: {res['assessment_result']['grand_score']}")
-            print(f"Estimated Angles: {res['angles']}")
-            print(f"Diagnostics: {res['diagnostics']}")
-            print("Successfully evaluated sample image!")
-        else:
-            print("No person detected.")
-    else:
-        print(f"Sample image not found: {test_img_path}")
+    print("=== Testing PoseAnalyzer on Synthetic Skeleton ===")
+    analyzer = PoseAnalyzer()
+
+    # 構造虛擬人體骨架 (面向右側直立站姿)
+    xy_mock = np.zeros((17, 2), dtype=np.float32)
+    conf_mock = np.ones(17, dtype=np.float32)
+
+    # 垂直坐標 (Y向下, X向右)
+    xy_mock[KP_NOSE] = [320, 100]
+    xy_mock[KP_L_EAR] = [310, 100]; xy_mock[KP_R_EAR] = [310, 100]
+    xy_mock[KP_L_SHOULDER] = [300, 160]; xy_mock[KP_R_SHOULDER] = [300, 160]
+    xy_mock[KP_L_ELBOW] = [300, 240]; xy_mock[KP_R_ELBOW] = [300, 240]
+    xy_mock[KP_L_WRIST] = [360, 240]; xy_mock[KP_R_WRIST] = [360, 240]  # 手肘直角
+    xy_mock[KP_L_HIP] = [300, 320]; xy_mock[KP_R_HIP] = [300, 320]
+    xy_mock[KP_L_KNEE] = [300, 420]; xy_mock[KP_R_KNEE] = [300, 420]
+    xy_mock[KP_L_ANKLE] = [300, 520]; xy_mock[KP_R_ANKLE] = [300, 520]
+
+    angles, side_used, diag = analyzer.calculate_body_angles(xy_mock, conf_mock, side="auto")
+    print(f"Side used: {side_used}, Facing: {diag['facing']}")
+    print(f"Calculated Angles: {angles}")
+    rula_res = calculate_rula(angles)
+    print(f"RULA Grand Score: {rula_res['grand_score']}, AL: {rula_res['action_level']}")
+    print("PoseAnalyzer 自我測試通過！")
