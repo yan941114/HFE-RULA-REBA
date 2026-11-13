@@ -42,12 +42,11 @@ venv.bak/
 *.mov
 *.mkv
 *.wmv
-課堂講義/*.mp4
 
-# Model weights (YOLO)
-# Uncomment if you don't want to track model weights on GitHub:
-# *.pt
-# *.onnx
+# Course Lectures & Group Photo (Local Only)
+課堂講義/
+六人合照_姓名標示.png
+random_calib_target20_pro.py
 
 # OS generated
 Thumbs.db

@@ -375,7 +375,11 @@ with tab_video:
                     st.markdown("#### 🚨 全片最高危害瞬間截圖 (Peak Hazard Frame)")
                     if peak_img is not None:
                         peak_rgb = cv2.cvtColor(peak_img, cv2.COLOR_BGR2RGB)
-                        st.image(peak_rgb, caption=f"時間: {peak_rec.get('timestamp_sec', 0.0)}s ｜ 分數: {peak_score} ｜ AL: {peak_rec.get('action_level', 0)}", use_column_width=True)
+                        st.image(
+                            peak_rgb,
+                            caption=f"時間: {peak_rec.get('timestamp_sec', 0.0)}s ｜ 分數: {peak_score} ｜ AL: {peak_rec.get('action_level', 0)}（註：畫面為初始推論擷取之關鍵幀，最新重算分數請參考上方指標）",
+                            use_column_width=True
+                        )
 
                 # 下載完整 CSV
                 import io

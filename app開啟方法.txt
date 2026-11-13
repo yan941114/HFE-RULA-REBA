@@ -1,0 +1,15 @@
+# RULA / REBA 自動化人因工程評估系統 - 啟動步驟說明
+
+1. 開啟 CMD 或 PowerShell 終端機：
+   cd "C:\Users\yan\OneDrive\桌面\作業紀錄\人因工程與實驗設計"
+
+2. 切換至專案 Conda 虛擬環境：
+   conda activate pose
+
+3. 啟動 Streamlit 互動式儀表板：
+   streamlit run app.py
+
+4. 在瀏覽器中開啟：
+   http://localhost:8501
+
+（提示：若要在背景執行或自動開啟，也可直接執行上述指令）
