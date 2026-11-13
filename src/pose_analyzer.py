@@ -66,14 +66,20 @@ KP_L_HIP, KP_R_HIP = 11, 12
 KP_L_KNEE, KP_R_KNEE = 13, 14
 KP_L_ANKLE, KP_R_ANKLE = 15, 16
 
-# 骨架連線關係
+# 骨架連線關係 (COCO 17 Keypoints 完整解剖學拓撲)
 SKELETON_EDGES = [
+    # 頭部與五官
+    (KP_NOSE, KP_L_EYE), (KP_NOSE, KP_R_EYE),
+    (KP_L_EYE, KP_L_EAR), (KP_R_EYE, KP_R_EAR),
+    # 軀幹與胸肩
     (KP_L_SHOULDER, KP_R_SHOULDER),
-    (KP_L_SHOULDER, KP_L_ELBOW), (KP_L_ELBOW, KP_L_WRIST),
-    (KP_R_SHOULDER, KP_R_ELBOW), (KP_R_ELBOW, KP_R_WRIST),
     (KP_L_SHOULDER, KP_L_HIP), (KP_R_SHOULDER, KP_R_HIP),
     (KP_L_HIP, KP_R_HIP),
+    # 左上肢與左下肢
+    (KP_L_SHOULDER, KP_L_ELBOW), (KP_L_ELBOW, KP_L_WRIST),
     (KP_L_HIP, KP_L_KNEE), (KP_L_KNEE, KP_L_ANKLE),
+    # 右上肢與右下肢
+    (KP_R_SHOULDER, KP_R_ELBOW), (KP_R_ELBOW, KP_R_WRIST),
     (KP_R_HIP, KP_R_KNEE), (KP_R_KNEE, KP_R_ANKLE)
 ]
 
@@ -346,7 +352,8 @@ class PoseAnalyzer:
                       image_bgr: np.ndarray,
                       side: str = "auto",
                       method: str = "RULA",
-                      manual_modifiers: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+                      manual_modifiers: Optional[Dict[str, Any]] = None,
+                      draw_hud: bool = False) -> Optional[Dict[str, Any]]:
         """
         完整分析單張影像：姿態偵測 -> 角度計算 -> RULA/REBA 評分 -> 繪製骨架
 
@@ -354,6 +361,7 @@ class PoseAnalyzer:
         :param side: 'auto', 'left', 'right'
         :param method: 'RULA' 或 'REBA'
         :param manual_modifiers: 專家負重/環境參數
+        :param draw_hud: 是否在影像左上角繪製抬頭顯示卡 (預設 False，保持畫面乾淨)
         :return: 包含標註影像、角度、評分結果之字典
         """
         detection = self.extract_keypoints(image_bgr)
@@ -373,8 +381,8 @@ class PoseAnalyzer:
             score = assessment_result["grand_score"]
             level = assessment_result["action_level"]
 
-        # 標註骨架疊圖
-        annotated_img = self.render_overlay(image_bgr, xy, conf, side_used, assessment_result, angles)
+        # 標註骨架疊圖 (預設不畫黃色 HUD 框，完整呈現全身雙側節點)
+        annotated_img = self.render_overlay(image_bgr, xy, conf, side_used, assessment_result, angles, draw_hud=draw_hud)
 
         return {
             "assessment_result": assessment_result,
@@ -393,13 +401,18 @@ class PoseAnalyzer:
                        conf: np.ndarray,
                        side_used: str,
                        assessment: Dict[str, Any],
-                       angles: Dict[str, float]) -> np.ndarray:
-        """在影像上繪製半透明資訊看板與人體骨架"""
+                       angles: Dict[str, float],
+                       draw_hud: bool = False) -> np.ndarray:
+        """
+        在影像上繪製完整人體骨架（包含雙側肢體與關節節點），並可依需求疊加資訊看板
+
+        :param draw_hud: 若為 False 則僅繪製乾淨人體骨架連線與節點；若為 True 則在左上角繪製英文資訊卡
+        """
         out = img.copy()
         h, w = out.shape[:2]
 
         # 依風險水準決定顏色 (BGR)
-        level = assessment["action_level"]
+        level = assessment.get("action_level", 1)
         if level <= 1:
             risk_color = (0, 200, 0)      # 綠色 (Low)
         elif level == 2:
@@ -409,51 +422,101 @@ class PoseAnalyzer:
         else:
             risk_color = (0, 0, 255)      # 紅色 (Very High)
 
-        # 1. 繪製骨架連線
+        # 定義雙側肢體關係
+        left_limbs = {
+            (KP_L_SHOULDER, KP_L_ELBOW), (KP_L_ELBOW, KP_L_WRIST),
+            (KP_L_HIP, KP_L_KNEE), (KP_L_KNEE, KP_L_ANKLE)
+        }
+        right_limbs = {
+            (KP_R_SHOULDER, KP_R_ELBOW), (KP_R_ELBOW, KP_R_WRIST),
+            (KP_R_HIP, KP_R_KNEE), (KP_R_KNEE, KP_R_ANKLE)
+        }
+        left_kpts = {KP_L_SHOULDER, KP_L_ELBOW, KP_L_WRIST, KP_L_HIP, KP_L_KNEE, KP_L_ANKLE}
+        right_kpts = {KP_R_SHOULDER, KP_R_ELBOW, KP_R_WRIST, KP_R_HIP, KP_R_KNEE, KP_R_ANKLE}
+
+        is_left_active = (side_used == "left")
+
+        # 1. 繪製骨架連線 (兩側肢體與軀幹、五官完整繪製)
         for (i1, i2) in SKELETON_EDGES:
             if conf[i1] >= self.conf_thres and conf[i2] >= self.conf_thres:
                 pt1 = (int(xy[i1][0]), int(xy[i1][1]))
                 pt2 = (int(xy[i2][0]), int(xy[i2][1]))
-                cv2.line(out, pt1, pt2, (240, 240, 240), 2, cv2.LINE_AA)
 
-        # 2. 標註使用側的關節點 (彩色醒目顯示)
-        is_left = (side_used == "left")
-        active_indices = [
-            KP_NOSE,
-            KP_L_SHOULDER if is_left else KP_R_SHOULDER,
-            KP_L_ELBOW if is_left else KP_R_ELBOW,
-            KP_L_WRIST if is_left else KP_R_WRIST,
-            KP_L_HIP if is_left else KP_R_HIP,
-            KP_L_KNEE if is_left else KP_R_KNEE,
-        ]
+                pair = (i1, i2)
+                if pair in left_limbs:
+                    if is_left_active:
+                        # 活躍評估側：風險主色粗線
+                        cv2.line(out, pt1, pt2, risk_color, 4, cv2.LINE_AA)
+                    else:
+                        # 輔助側：水青色清晰細線
+                        cv2.line(out, pt1, pt2, (235, 180, 50), 2, cv2.LINE_AA)
+                elif pair in right_limbs:
+                    if not is_left_active:
+                        # 活躍評估側：風險主色粗線
+                        cv2.line(out, pt1, pt2, risk_color, 4, cv2.LINE_AA)
+                    else:
+                        # 輔助側：暖珊瑚橘細線
+                        cv2.line(out, pt1, pt2, (50, 140, 235), 2, cv2.LINE_AA)
+                else:
+                    # 軀幹與頭部五官連線：淺灰白純淨線條
+                    cv2.line(out, pt1, pt2, (240, 240, 240), 2, cv2.LINE_AA)
 
-        for idx in active_indices:
+        # 繪製頸椎連線 (鼻子到雙肩中心)
+        if (conf[KP_NOSE] >= self.conf_thres and
+            conf[KP_L_SHOULDER] >= self.conf_thres and
+            conf[KP_R_SHOULDER] >= self.conf_thres):
+            mid_sh = ((xy[KP_L_SHOULDER] + xy[KP_R_SHOULDER]) / 2.0).astype(int)
+            pt_nose = (int(xy[KP_NOSE][0]), int(xy[KP_NOSE][1]))
+            cv2.line(out, pt_nose, (int(mid_sh[0]), int(mid_sh[1])), (240, 240, 240), 2, cv2.LINE_AA)
+
+        # 2. 標註所有 17 關鍵點節點 (雙側完整呈現，評估側亮顯)
+        for idx in range(17):
             if conf[idx] >= self.conf_thres:
                 pt = (int(xy[idx][0]), int(xy[idx][1]))
-                cv2.circle(out, pt, 6, risk_color, -1, cv2.LINE_AA)
-                cv2.circle(out, pt, 8, (255, 255, 255), 2, cv2.LINE_AA)
+                is_eval_kpt = (idx in left_kpts if is_left_active else idx in right_kpts)
 
-        # 3. 繪製 HUD 數據抬頭資訊看板 (左上角半透明背景)
+                if is_eval_kpt:
+                    # 主要評估側關節：大圓點 + 白邊框 + 風險主色填充
+                    cv2.circle(out, pt, 7, risk_color, -1, cv2.LINE_AA)
+                    cv2.circle(out, pt, 9, (255, 255, 255), 2, cv2.LINE_AA)
+                elif idx in left_kpts:
+                    # 左側非主要評估關節：青水藍圓點
+                    cv2.circle(out, pt, 5, (235, 180, 50), -1, cv2.LINE_AA)
+                    cv2.circle(out, pt, 6, (255, 255, 255), 1, cv2.LINE_AA)
+                elif idx in right_kpts:
+                    # 右側非主要評估關節：暖珊瑚橘圓點
+                    cv2.circle(out, pt, 5, (50, 140, 235), -1, cv2.LINE_AA)
+                    cv2.circle(out, pt, 6, (255, 255, 255), 1, cv2.LINE_AA)
+                else:
+                    # 頭部與軀幹節點：金黃亮色節點
+                    cv2.circle(out, pt, 5, (0, 215, 255), -1, cv2.LINE_AA)
+                    cv2.circle(out, pt, 6, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # 3. 若未啟用 draw_hud，直接回傳乾淨的骨架影像 (不遮擋工人與機台)
+        if not draw_hud:
+            return out
+
+        # 4. 若特別啟用 HUD，則在左上角繪製全英文抬頭看板 (避免 OpenCV 繁體字印出問號)
         overlay = out.copy()
         cv2.rectangle(overlay, (15, 15), (380, 210), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.7, out, 0.3, 0, out)
         cv2.rectangle(out, (15, 15), (380, 210), risk_color, 2)
 
-        method = assessment["assessment"]
-        score_val = assessment.get("final_reba_score") if method == "REBA" else assessment.get("grand_score")
-        risk_str = assessment["risk_level"].split()[0]
+        method = assessment.get("assessment", "RULA")
+        score_val = assessment.get("final_reba_score") if method == "REBA" else assessment.get("grand_score", 0)
+        risk_str_en = "Acceptable" if level <= 1 else ("Low Risk" if level == 2 else ("Medium Risk" if level == 3 else "High Risk"))
 
         cv2.putText(out, f"{method} Assessment: {score_val} (AL {level})", (30, 45),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(out, f"Status: {risk_str}", (30, 75),
+        cv2.putText(out, f"Status: {risk_str_en}", (30, 75),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, risk_color, 2, cv2.LINE_AA)
         cv2.putText(out, f"Eval Side: {side_used.upper()}", (30, 105),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
 
-        # 關節角度摘要
-        ang_text_1 = f"Trunk: {angles['trunk']:+.1f} deg | Neck: {angles['neck']:+.1f} deg"
-        ang_text_2 = f"Upper Arm: {angles['upper_arm']:+.1f} deg | Elbow: {angles['lower_arm']:.1f} deg"
-        ang_text_3 = f"Knee: {angles['knee']:.1f} deg"
+        # 關節角度摘要 (全英文安全字元)
+        ang_text_1 = f"Trunk: {angles.get('trunk', 0.0):+.1f} deg | Neck: {angles.get('neck', 0.0):+.1f} deg"
+        ang_text_2 = f"Upper Arm: {angles.get('upper_arm', 0.0):+.1f} deg | Elbow: {angles.get('lower_arm', 0.0):.1f} deg"
+        ang_text_3 = f"Knee: {angles.get('knee', 0.0):.1f} deg"
         cv2.putText(out, ang_text_1, (30, 135), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
         cv2.putText(out, ang_text_2, (30, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
         cv2.putText(out, ang_text_3, (30, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1, cv2.LINE_AA)
@@ -466,7 +529,8 @@ class PoseAnalyzer:
                       side: str = "auto",
                       manual_modifiers: Optional[Dict[str, Any]] = None,
                       sample_interval: int = 1,
-                      output_annotated_path: Optional[str] = None) -> Dict[str, Any]:
+                      output_annotated_path: Optional[str] = None,
+                      draw_hud: bool = False) -> Dict[str, Any]:
         """
         處理影片時間序列：逐幀分析、EMA 平滑、統計時長佔比、偵測最高風險瞬間 (Peak Risk Frame)
 
@@ -520,7 +584,7 @@ class PoseAnalyzer:
                         score = res["grand_score"]
                         level = res["action_level"]
 
-                    annotated = self.render_overlay(frame, xy, conf, side_used, res, angles)
+                    annotated = self.render_overlay(frame, xy, conf, side_used, res, angles, draw_hud=draw_hud)
                     if writer:
                         writer.write(annotated)
 

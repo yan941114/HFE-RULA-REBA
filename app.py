@@ -45,7 +45,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自訂 CSS 樣式
+# 自訂 CSS 樣式 (深淺色模式通用高對比設計)
 st.markdown("""
 <style>
     .main-header {
@@ -59,34 +59,37 @@ st.markdown("""
         color: #4B5563;
         margin-bottom: 1.5rem;
     }
+    .score-card {
+        padding: 18px 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08);
+    }
     .score-card-al1 {
         background-color: #ECFDF5;
         border-left: 6px solid #10B981;
-        padding: 16px;
-        border-radius: 8px;
+        color: #065F46 !important;
     }
     .score-card-al2 {
-        background-color: #FEFCE8;
+        background-color: #FFFBEB;
         border-left: 6px solid #F59E0B;
-        padding: 16px;
-        border-radius: 8px;
+        color: #78350F !important;
     }
     .score-card-al3 {
         background-color: #FFF7ED;
         border-left: 6px solid #F97316;
-        padding: 16px;
-        border-radius: 8px;
+        color: #7C2D12 !important;
     }
     .score-card-al4 {
         background-color: #FEF2F2;
         border-left: 6px solid #EF4444;
-        padding: 16px;
-        border-radius: 8px;
+        color: #7F1D1D !important;
     }
     .metric-val {
-        font-size: 2.4rem;
-        font-weight: 800;
-        line-height: 1.1;
+        font-size: 2.6rem;
+        font-weight: 900;
+        line-height: 1.15;
+        margin: 6px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -171,6 +174,14 @@ with st.sidebar.expander("進階姿態補正項 (進一步微調)", expanded=Fal
     neck_side_bending = st.checkbox("頸部側彎 (+1)")
     legs_supported = st.checkbox("雙腳支撐良好且平衡", value=True)
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("視覺呈現設定")
+draw_hud = st.sidebar.checkbox(
+    "在影像疊加 HUD 抬頭資訊框",
+    value=False,
+    help="預設關閉，保持畫面整潔不遮擋人體；所有評估資訊均已完整顯示於右側看板"
+)
+
 # RULA Force/Load Score (0~3) 標準轉換邏輯
 if load_kg < 2.0:
     rula_force = 0
@@ -239,7 +250,8 @@ with tab_photo:
                 img_bgr,
                 side=side_choice,
                 method=method,
-                manual_modifiers=manual_modifiers
+                manual_modifiers=manual_modifiers,
+                draw_hud=draw_hud
             )
 
         if res is not None:
@@ -248,24 +260,39 @@ with tab_photo:
             with col_img:
                 st.markdown("#### 骨架與關節疊圖標註")
                 img_rgb = cv2.cvtColor(res["annotated_image"], cv2.COLOR_BGR2RGB)
-                st.image(img_rgb, use_column_width=True)
+                st.image(img_rgb, use_container_width=True)
                 diag = res["diagnostics"]
-                st.caption(f"面向判定: **{diag['facing'].upper()}** ｜ 使用肢體側: **{diag['side_used'].upper()}** ｜ 左側信心: {diag['left_confidence']} ｜ 右側信心: {diag['right_confidence']}")
+                facing_zh = "朝左 (Left)" if diag['facing'] == 'left' else ("朝右 (Right)" if diag['facing'] == 'right' else "正面/未定")
+                side_zh = "左側 (Left)" if diag['side_used'] == 'left' else "右側 (Right)"
+                st.caption(f"🧭 面向判定: **{facing_zh}** ｜ 🎯 主要評估肢體: **{side_zh}** ｜ 左側信心: {diag['left_confidence']:.2f} ｜ 右側信心: {diag['right_confidence']:.2f}")
 
             with col_score:
                 st.markdown("#### 評估結果看板")
                 ass = res["assessment_result"]
                 al = ass["action_level"]
                 score_val = ass.get("final_reba_score") if method == "REBA" else ass.get("grand_score")
+                flat = res["flattened"]
 
-                # 樣式卡片
-                card_class = f"score-card-al{min(4, max(1, al))}"
+                # 配色常數 (純文字與邊框色，深淺色主題皆清晰)
+                al_theme = {
+                    1: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
+                    2: {"border": "#F59E0B", "bg": "#FFFBEB", "text": "#78350F", "score": "#B45309"},
+                    3: {"border": "#F97316", "bg": "#FFF7ED", "text": "#7C2D12", "score": "#C2410C"},
+                    4: {"border": "#EF4444", "bg": "#FEF2F2", "text": "#7F1D1D", "score": "#B91C1C"},
+                }.get(min(4, max(1, al)))
+
                 st.markdown(f"""
-                <div class="{card_class}">
-                    <div style="font-size: 1.1rem; font-weight: 600; color: #374151;">{method} 總分 (Grand Score)</div>
-                    <div class="metric-val">{score_val} <span style="font-size: 1.2rem; font-weight: 500;">/ 行動水準 AL {al}</span></div>
-                    <div style="font-size: 1.05rem; font-weight: 600; margin-top: 6px;">風險狀態：{ass['risk_level']}</div>
-                    <div style="font-size: 0.95rem; color: #4B5563; margin-top: 4px;">{ass['action_description']}</div>
+                <div style="background-color: {al_theme['bg']}; border-left: 6px solid {al_theme['border']}; padding: 18px 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.07);">
+                    <div style="font-size: 1.15rem; font-weight: 700; color: {al_theme['text']};">{method} 人體工學綜合總分</div>
+                    <div style="font-size: 2.7rem; font-weight: 900; color: {al_theme['score']}; line-height: 1.15; margin: 4px 0;">
+                        {score_val} <span style="font-size: 1.2rem; font-weight: 600; color: {al_theme['text']};">分 ｜ 行動水準 AL {al}</span>
+                    </div>
+                    <div style="font-size: 1.1rem; font-weight: 700; color: {al_theme['text']}; margin-top: 6px;">
+                        風險狀態：{ass['risk_level']}
+                    </div>
+                    <div style="font-size: 0.95rem; color: #374151; margin-top: 6px; line-height: 1.45;">
+                        📋 改善建議：{ass['action_description']}
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -282,8 +309,38 @@ with tab_photo:
                 col_b3.metric("手腕角度", f"{angles['wrist']:.1f}°")
 
                 # 詳細子分數表格
-                with st.expander("查看查表拆解明細 (Table A / B / C 矩陣)", expanded=False):
-                    st.json(res["flattened"])
+                with st.expander("📊 查看查表拆解明細 (表 A / 表 B / 表 C 得分矩陣)", expanded=False):
+                    col_sub1, col_sub2 = st.columns(2)
+                    with col_sub1:
+                        if method == "RULA":
+                            st.markdown("**📌 表 A 群 (上臂、前臂、手腕)**")
+                            st.write(f"- 上臂姿勢得分: **{flat.get('upper_arm_score', '-')} 分**")
+                            st.write(f"- 前臂姿勢得分: **{flat.get('lower_arm_score', '-')} 分**")
+                            st.write(f"- 手腕與扭轉得分: **{flat.get('wrist_score', '-')} 分**")
+                            st.write(f"- 表 A 查表得分: **{flat.get('table_a_score', '-')} 分**")
+                            st.write(f"- 修正後得分 C: **{flat.get('wrist_arm_score', '-')} 分**")
+                        else:
+                            st.markdown("**📌 表 A 群 (軀幹、頸部、腿部)**")
+                            st.write(f"- 軀幹姿勢得分: **{flat.get('trunk_score', '-')} 分**")
+                            st.write(f"- 頸部姿勢得分: **{flat.get('neck_score', '-')} 分**")
+                            st.write(f"- 腿部姿勢得分: **{flat.get('legs_score', '-')} 分**")
+                            st.write(f"- 表 A 查表得分: **{flat.get('table_a_score', '-')} 分**")
+                            st.write(f"- 修正後得分 A: **{flat.get('score_a', '-')} 分**")
+                    with col_sub2:
+                        if method == "RULA":
+                            st.markdown("**📌 表 B 群 (頸部、軀幹、腿部)**")
+                            st.write(f"- 頸部姿勢得分: **{flat.get('neck_score', '-')} 分**")
+                            st.write(f"- 軀幹姿勢得分: **{flat.get('trunk_score', '-')} 分**")
+                            st.write(f"- 腿部姿勢得分: **{flat.get('legs_score', '-')} 分**")
+                            st.write(f"- 表 B 查表得分: **{flat.get('table_b_score', '-')} 分**")
+                            st.write(f"- 修正後得分 D: **{flat.get('neck_trunk_score', '-')} 分**")
+                        else:
+                            st.markdown("**📌 表 B 群 (上臂、前臂、手腕)**")
+                            st.write(f"- 上臂姿勢得分: **{flat.get('upper_arm_score', '-')} 分**")
+                            st.write(f"- 前臂姿勢得分: **{flat.get('lower_arm_score', '-')} 分**")
+                            st.write(f"- 手腕姿勢得分: **{flat.get('wrist_score', '-')} 分**")
+                            st.write(f"- 表 B 查表得分: **{flat.get('table_b_score', '-')} 分**")
+                            st.write(f"- 修正後得分 B: **{flat.get('score_b', '-')} 分**")
         else:
             st.warning("未能在此影像中偵測到清晰的人體關鍵點，請嘗試其他角度或光線充足之照片。")
     else:
@@ -323,7 +380,8 @@ with tab_video:
                         method=method,
                         side=side_choice,
                         manual_modifiers=manual_modifiers,
-                        sample_interval=sample_step
+                        sample_interval=sample_step,
+                        draw_hud=draw_hud
                     )
                     st.session_state["cached_video_records"] = res_video["time_series_records"]
                     st.session_state["cached_video_peak_img"] = res_video["peak_risk_image"]
@@ -372,14 +430,42 @@ with tab_video:
                     st.line_chart(chart_data, x="時間 (秒)", y=f"{method} 風險分數")
 
                 with col_peak:
-                    st.markdown("#### 🚨 全片最高危害瞬間截圖 (Peak Hazard Frame)")
+                    st.markdown("#### 🚨 全片最高危害瞬間截圖")
                     if peak_img is not None:
                         peak_rgb = cv2.cvtColor(peak_img, cv2.COLOR_BGR2RGB)
                         st.image(
                             peak_rgb,
-                            caption=f"時間: {peak_rec.get('timestamp_sec', 0.0)}s ｜ 分數: {peak_score} ｜ AL: {peak_rec.get('action_level', 0)}（註：畫面為初始推論擷取之關鍵幀，最新重算分數請參考上方指標）",
-                            use_column_width=True
+                            use_container_width=True
                         )
+
+                        peak_al = peak_rec.get("action_level", 1)
+                        peak_risk = peak_rec.get("risk_level", "一般風險")
+                        peak_time = peak_rec.get("timestamp_sec", 0.0)
+
+                        al_theme_peak = {
+                            1: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
+                            2: {"border": "#F59E0B", "bg": "#FFFBEB", "text": "#78350F", "score": "#B45309"},
+                            3: {"border": "#F97316", "bg": "#FFF7ED", "text": "#7C2D12", "score": "#C2410C"},
+                            4: {"border": "#EF4444", "bg": "#FEF2F2", "text": "#7F1D1D", "score": "#B91C1C"},
+                        }.get(min(4, max(1, peak_al)))
+
+                        st.markdown(f"""
+                        <div style="background-color: {al_theme_peak['bg']}; border-left: 6px solid {al_theme_peak['border']}; padding: 14px 16px; border-radius: 8px; margin-top: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.06);">
+                            <div style="font-size: 0.95rem; font-weight: 700; color: {al_theme_peak['text']};">⚠️ 危害峰值資訊 (時間點: {peak_time} 秒)</div>
+                            <div style="font-size: 1.8rem; font-weight: 900; color: {al_theme_peak['score']}; line-height: 1.2; margin: 4px 0;">
+                                {method} 評分：{peak_score} 分 <span style="font-size: 1.05rem; font-weight: 600; color: {al_theme_peak['text']};">/ 行動水準 AL {peak_al}</span>
+                            </div>
+                            <div style="font-size: 0.95rem; font-weight: 700; color: {al_theme_peak['text']};">風險程度：{peak_risk}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        col_pk1, col_pk2 = st.columns(2)
+                        with col_pk1:
+                            st.write(f"📐 軀幹角度: **{peak_rec.get('trunk_angle', 0.0):+.1f}°**")
+                            st.write(f"📐 頸部角度: **{peak_rec.get('neck_angle', 0.0):+.1f}°**")
+                        with col_pk2:
+                            st.write(f"📐 上臂角度: **{peak_rec.get('upper_arm_angle', 0.0):+.1f}°**")
+                            st.write(f"📐 前臂手肘: **{peak_rec.get('lower_arm_angle', 0.0):.1f}°**")
 
                 # 下載完整 CSV
                 import io
