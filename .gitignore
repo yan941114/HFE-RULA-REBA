@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Jupyter & IDEs
+.ipynb_checkpoints
+.vscode/
+.idea/
+*.swp
+
+# Heavy Media & Model Weights (>20MB)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+課堂講義/*.mp4
+
+# Model weights (YOLO)
+# Uncomment if you don't want to track model weights on GitHub:
+# *.pt
+# *.onnx
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Logs & temp outputs
+*.log
+temp/
+outputs/
