@@ -242,9 +242,8 @@ def score_lower_arm(angle_deg: float,
 
     adj = 0
     if not is_reba:
-        if across_midline:
-            adj += 1
-        if out_to_side:
+        # RULA 規範：跨中線或向外張開為「或」的關係，加 1 分
+        if across_midline or out_to_side:
             adj += 1
 
     max_score = 2 if is_reba else 3
@@ -262,10 +261,12 @@ def score_lower_arm(angle_deg: float,
 def score_wrist(angle_deg: float,
                 deviated: bool = False,
                 twisted: bool = False,
-                is_reba: bool = False) -> Tuple[int, Dict[str, Any]]:
+                is_reba: bool = False,
+                neutral_tol: float = 5.0) -> Tuple[int, Dict[str, Any]]:
     """
     評估手腕分數 (Wrist Score)
     angle_deg: 屈曲或伸展角度 (取絕對值)
+    neutral_tol: 人因自然直立/中立容許公差 (度)
     """
     abs_angle = abs(angle_deg)
     if is_reba:
@@ -273,7 +274,9 @@ def score_wrist(angle_deg: float,
         adj = 1 if (deviated or twisted) else 0
         final = max(1, min(3, base + adj))
     else:
-        if abs_angle < 1e-3:
+        # RULA: 0° 為 1; 0~15° 為 2; >15° 為 3
+        # 考慮視覺估計浮動公差，中立範圍 (< neutral_tol) 給予 1 分
+        if abs_angle <= neutral_tol:
             base = 1
         elif abs_angle <= 15.0:
             base = 2
@@ -336,27 +339,33 @@ def score_trunk(angle_deg: float,
                 twisted: bool = False,
                 side_bending: bool = False,
                 sitting_supported: bool = False,
-                is_reba: bool = False) -> Tuple[int, Dict[str, Any]]:
+                is_reba: bool = False,
+                neutral_tol: float = 5.0) -> Tuple[int, Dict[str, Any]]:
     """
     評估軀幹分數 (Trunk Score)
     正角為前傾 (Flexion)，負角為後仰 (Extension)
+    neutral_tol: 人體工學自然直立容許公差 (度，預設 5.0°)
     """
     abs_angle = abs(angle_deg)
     if is_reba:
-        if abs_angle < 1e-3:
+        # REBA: 自然直立在容許公差內為 1 分
+        if abs_angle <= neutral_tol:
             base = 1
-        elif 0.0 < abs_angle <= 20.0:
+        elif angle_deg < -neutral_tol:  # 後仰 (Extension)
+            base = 2 if abs_angle <= 20.0 else 3
+        elif abs_angle <= 20.0:
             base = 2
-        elif 20.0 < abs_angle <= 60.0 or (angle_deg < -20.0):
+        elif abs_angle <= 60.0:
             base = 3
         else:  # > 60°
             base = 4
     else:
-        if sitting_supported and abs_angle <= 5.0:
+        # RULA: 坐姿有支撐，或是站姿接近垂直 (在容許公差內)，皆為 1 分
+        if sitting_supported or abs_angle <= neutral_tol:
             base = 1
-        elif 0.0 <= abs_angle <= 20.0:
+        elif abs_angle <= 20.0:
             base = 2
-        elif 20.0 < abs_angle <= 60.0:
+        elif abs_angle <= 60.0:
             base = 3
         else:  # > 60°
             base = 4
@@ -721,6 +730,54 @@ def calculate_reba(auto_angles: Dict[str, float],
         "score_c": score_c,
         "activity_score": activity
     }
+
+
+# ==============================================================================
+# 扁平化工具函式 (Flattening Helper for Pandas/CSV Export)
+# ==============================================================================
+
+def flatten_assessment_result(res: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    將巢狀評估結果展平為單層 Dict，方便直接轉為 Pandas DataFrame 或匯出 CSV
+
+    :param res: calculate_rula 或 calculate_reba 的回傳字典
+    :return: 扁平化單層字典
+    """
+    is_reba = (res["assessment"] == "REBA")
+    ga = res["group_a"]
+    gb = res["group_b"]
+
+    flat = {
+        "assessment": res["assessment"],
+        "final_score": res.get("final_reba_score") if is_reba else res.get("grand_score"),
+        "action_level": res["action_level"],
+        "risk_level": res["risk_level"],
+        "action_description": res["action_description"],
+        # 各部位角度與子分數 (統一欄位名稱，利於 CSV 橫向對齊)
+        "upper_arm_angle": ga["upper_arm"]["angle"] if not is_reba else gb["upper_arm"]["angle"],
+        "upper_arm_score": ga["upper_arm"]["final_score"] if not is_reba else gb["upper_arm"]["final_score"],
+        "lower_arm_angle": ga["lower_arm"]["angle"] if not is_reba else gb["lower_arm"]["angle"],
+        "lower_arm_score": ga["lower_arm"]["final_score"] if not is_reba else gb["lower_arm"]["final_score"],
+        "wrist_angle": ga["wrist"]["angle"] if not is_reba else gb["wrist"]["angle"],
+        "wrist_score": ga["wrist"]["final_score"] if not is_reba else gb["wrist"]["final_score"],
+        "neck_angle": gb["neck"]["angle"] if not is_reba else ga["neck"]["angle"],
+        "neck_score": gb["neck"]["final_score"] if not is_reba else ga["neck"]["final_score"],
+        "trunk_angle": gb["trunk"]["angle"] if not is_reba else ga["trunk"]["angle"],
+        "trunk_score": gb["trunk"]["final_score"] if not is_reba else ga["trunk"]["final_score"],
+        "legs_score": gb["legs"]["final_score"] if not is_reba else ga["legs"]["final_score"],
+        "posture_score_a": ga["posture_score_a"],
+        "posture_score_b": gb["posture_score_b"],
+    }
+    if is_reba:
+        flat["load_score"] = ga["load_score"]
+        flat["coupling_score"] = gb["coupling_score"]
+        flat["score_c"] = res["score_c"]
+        flat["activity_score"] = res["activity_score"]
+    else:
+        flat["score_c"] = ga["score_c"]
+        flat["score_d"] = gb["score_d"]
+
+    return flat
 
 
 # ==============================================================================
