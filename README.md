@@ -45,14 +45,20 @@
   - [x] 完整實作 RULA Table A, B, C 與 REBA Table A, B, C 矩陣
   - [x] 矢狀面正負方向性判定 (前屈 Flexion vs 後仰 Extension)
   - [x] 單元測試集通過 (包含課堂 P.47 高危害不良姿勢、P.64 搬運案例)
-- [ ] **階段二：關節角度提取模組 (`pose_analyzer.py`)**
-  - [ ] YOLO11 17 關鍵點推論與解剖學向量夾角計算
-  - [ ] 左右側評估與遮蔽側過濾 (Confidence Score 門檻)
-  - [ ] 影片時間序列平滑化 (EMA 濾波) 與最高風險關鍵影格 (Peak Risk Frame) 偵測
-- [ ] **階段三：專題批次驗證腳本 (`batch_evaluator.py`)**
-  - [ ] 資料夾批次處理，匯出包含預測角度、子分數、總分之 CSV
-  - [ ] 對接期末專題研究：計算自動評分 vs 人工專家一致性 (Cohen's Kappa / ICC)
-- [ ] **階段四：可互動 Web APP 介面**
+  - [x] 人因公差死區 (Tolerance) 與前臂修正規則修訂
+- [x] **階段二：關節角度提取模組 (`pose_analyzer.py`)**
+  - [x] YOLO11 17 關鍵點推論與解剖學向量夾角計算
+  - [x] 2D 外積 (Cross Product) 判定旋轉方向，徹底解決大角度彎腰時正負號反轉問題
+  - [x] 尺度無關 (Scale-Invariant) 面向自適應閾值
+  - [x] 修正前臂手肘 0° 伸展基準定義
+  - [x] 左右側自適應評估與遮蔽側過濾 (Confidence Score 門檻)
+  - [x] 影片時間序列平滑化 (EMA 濾波) 與最高風險關鍵影格 (Peak Risk Frame) 偵測
+  - [x] 預留階段四極速短路純重算接口 (`recalculate_video_scores`)
+- [x] **階段三：專題批次驗證腳本 (`batch_evaluator.py`)**
+  - [x] 資料夾批次處理，一鍵分析所有照片與影片
+  - [x] 匯出包含預測角度、子分數、總分、影片最高危害時長佔比之 CSV
+  - [x] 對接期末專題研究：自動計算 MAE、RMSE、評分一致率與線性加權 Cohen's Kappa 係數
+- [ ] **階段四：可互動 Web APP 介面 (`app.py`)**
   - [ ] 支援照片/影片上傳與即時看板
   - [ ] 整合快取機制與人機微調控制 (Human-in-the-loop)
 
@@ -67,10 +73,19 @@ conda activate pose
 ```
 
 ### 2. 執行單元測試
-驗證 RULA 與 REBA 查表模組是否運作正常：
+驗證所有演算法模組是否運作正常：
 ```powershell
 python tests/test_rula_reba.py
+python tests/test_pose_analyzer.py
+python tests/test_batch_evaluator.py
 ```
+
+### 3. 專題批次資料夾評估
+指定含有測試照片/影片的資料夾進行批次分析：
+```powershell
+python batch_evaluator.py --input-dir "你的測試資料夾路徑" --method RULA --output-dir outputs
+```
+若有專家標註的對照檔，加入 `--ground-truth ground_truth.csv` 即可自動產出學術論文級的 Kappa 與 MAE 驗證指標！
 
 ---
 
