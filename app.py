@@ -31,7 +31,9 @@ from src.rula_reba_engine import (
     calculate_rula,
     calculate_reba,
     flatten_assessment_result,
+    simulate_what_if_improvements,
 )
+from src.report_generator import generate_html_report
 from batch_evaluator import compute_cohens_weighted_kappa
 
 
@@ -123,8 +125,13 @@ method = st.sidebar.radio(
 
 side_choice = st.sidebar.selectbox(
     "肢體側別 (Evaluation Side)",
-    options=["auto", "left", "right"],
-    format_func=lambda x: "自動選擇最佳可見側 (Auto)" if x == "auto" else ("左側 (Left)" if x == "left" else "右側 (Right)")
+    options=["auto", "worst", "left", "right"],
+    format_func=lambda x: {
+        "auto": "自動選擇最佳可見側 (Auto)",
+        "worst": "自動取較高危害側 (Worst-Case 保守原則)",
+        "left": "左側 (Left: 僅評估左半身)",
+        "right": "右側 (Right: 僅評估右半身)"
+    }[x]
 )
 
 st.sidebar.markdown("---")
@@ -181,6 +188,11 @@ draw_hud = st.sidebar.checkbox(
     value=False,
     help="預設關閉，保持畫面整潔不遮擋人體；所有評估資訊均已完整顯示於右側看板"
 )
+show_angle_labels = st.sidebar.checkbox(
+    "在骨架旁標註關節幾何角度 (科技標籤)",
+    value=False,
+    help="在肩膀、手肘、軀幹旁繪製半透明角度數值膠囊，適合簡報與報告截圖"
+)
 
 # RULA Force/Load Score (0~3) 標準轉換邏輯
 if load_kg < 2.0:
@@ -188,7 +200,7 @@ if load_kg < 2.0:
 elif load_kg <= 10.0:
     rula_force = 2 if (act_static or act_repeat or load_shock) else 1
 else:
-    rula_force = 3 if (act_static or act_repeat or load_shock) else 2
+    rula_force = 3
 
 # 整合 modifiers 字典
 manual_modifiers = {
@@ -251,7 +263,8 @@ with tab_photo:
                 side=side_choice,
                 method=method,
                 manual_modifiers=manual_modifiers,
-                draw_hud=draw_hud
+                draw_hud=draw_hud,
+                show_angle_labels=show_angle_labels
             )
 
         if res is not None:
@@ -265,6 +278,10 @@ with tab_photo:
                 facing_zh = "朝左 (Left)" if diag['facing'] == 'left' else ("朝右 (Right)" if diag['facing'] == 'right' else "正面/未定")
                 side_zh = "左側 (Left)" if diag['side_used'] == 'left' else "右側 (Right)"
                 st.caption(f"🧭 面向判定: **{facing_zh}** ｜ 🎯 主要評估肢體: **{side_zh}** ｜ 左側信心: {diag['left_confidence']:.2f} ｜ 右側信心: {diag['right_confidence']:.2f}")
+
+                # 左右側身體負荷不對稱警示 (Asymmetry Alert)
+                if diag.get("asymmetry_alert", False):
+                    st.warning(f"⚠️ **身體負荷不對稱警示**：{diag.get('asymmetry_reason')}。建議檢查作業員是否有單側代償或單手提重不良姿勢！")
 
             with col_score:
                 st.markdown("#### 評估結果看板")
@@ -341,6 +358,36 @@ with tab_photo:
                             st.write(f"- 手腕姿勢得分: **{flat.get('wrist_score', '-')} 分**")
                             st.write(f"- 表 B 查表得分: **{flat.get('table_b_score', '-')} 分**")
                             st.write(f"- 修正後得分 B: **{flat.get('score_b', '-')} 分**")
+
+                # AI What-If 改善模擬器 (敏感度分析與改善效益排序)
+                what_if_scenarios = simulate_what_if_improvements(angles, manual_modifiers, method=method)
+                with st.expander("💡 AI 自動根因診斷與改善模擬 (What-If Simulation)", expanded=True):
+                    st.markdown("**🎯 改善效益排序與敏感度分析（AI 自動試算中立位效益）：**")
+                    for idx, sc in enumerate(what_if_scenarios, 1):
+                        delta = sc["score_delta"]
+                        badge = f"🔥 總分 -{delta} 分 (效益顯著)" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平 (0分)")
+                        st.markdown(f"**{idx}. {sc['part']}** ｜ `{badge}`")
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **模擬操作**：{sc['modification']}")
+                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **預期結果**：總分降至 **{sc['new_score']} 分** (行動水準 AL {sc['new_action_level']}) ｜ {sc['improvement_note']}")
+
+                # 下載正式人因工程單頁評估單 (HTML / PDF)
+                html_report = generate_html_report(
+                    assessment=ass,
+                    angles=angles,
+                    annotated_img_bgr=res["annotated_image"],
+                    method=method,
+                    manual_modifiers=manual_modifiers,
+                    what_if_scenarios=what_if_scenarios,
+                    diagnostics=diag,
+                    item_name=uploaded_image.name
+                )
+                st.download_button(
+                    label="📄 下載正式人因工程評估檢核單 (.html / 可一鍵列印 PDF)",
+                    data=html_report.encode("utf-8"),
+                    file_name=f"ErgoReport_{method}_{uploaded_image.name}.html",
+                    mime="text/html",
+                    key="dl_photo_report"
+                )
         else:
             st.warning("未能在此影像中偵測到清晰的人體關鍵點，請嘗試其他角度或光線充足之照片。")
     else:
@@ -381,7 +428,8 @@ with tab_video:
                         side=side_choice,
                         manual_modifiers=manual_modifiers,
                         sample_interval=sample_step,
-                        draw_hud=draw_hud
+                        draw_hud=draw_hud,
+                        show_angle_labels=show_angle_labels
                     )
                     st.session_state["cached_video_records"] = res_video["time_series_records"]
                     st.session_state["cached_video_peak_img"] = res_video["peak_risk_image"]
@@ -466,6 +514,48 @@ with tab_video:
                         with col_pk2:
                             st.write(f"📐 上臂角度: **{peak_rec.get('upper_arm_angle', 0.0):+.1f}°**")
                             st.write(f"📐 前臂手肘: **{peak_rec.get('lower_arm_angle', 0.0):.1f}°**")
+
+                        # 峰值瞬間 AI 改善模擬
+                        peak_angles = peak_rec.get("raw_angles", {
+                            "trunk": peak_rec.get("trunk_angle", 0.0),
+                            "neck": peak_rec.get("neck_angle", 0.0),
+                            "upper_arm": peak_rec.get("upper_arm_angle", 0.0),
+                            "lower_arm": peak_rec.get("lower_arm_angle", 90.0),
+                            "wrist": peak_rec.get("wrist_angle", 0.0),
+                            "knee": peak_rec.get("knee_angle", 0.0)
+                        })
+                        peak_what_if = simulate_what_if_improvements(peak_angles, manual_modifiers, method=method)
+                        with st.expander("💡 峰值瞬間 AI 改善模擬 (What-If Simulation)", expanded=False):
+                            for idx, sc in enumerate(peak_what_if, 1):
+                                delta = sc["score_delta"]
+                                badge = f"🔥 總分 -{delta} 分" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平")
+                                st.markdown(f"**{idx}. {sc['part']}** ({badge}): {sc['modification']} ➜ 總分降至 **{sc['new_score']} 分** (AL {sc['new_action_level']})")
+
+                        # 下載最高危害瞬間正式人因報告
+                        peak_report_html = generate_html_report(
+                            assessment={
+                                "assessment": method,
+                                "grand_score": peak_score,
+                                "final_reba_score": peak_score,
+                                "action_level": peak_al,
+                                "risk_level": peak_risk,
+                                "action_description": peak_rec.get("action_description", "")
+                            },
+                            angles=peak_angles,
+                            annotated_img_bgr=peak_img,
+                            method=method,
+                            manual_modifiers=manual_modifiers,
+                            what_if_scenarios=peak_what_if,
+                            diagnostics={"facing": "N/A", "side_used": peak_rec.get("side_used", "auto"), "left_confidence": 1.0, "right_confidence": 1.0},
+                            item_name=f"Peak_{uploaded_video.name}"
+                        )
+                        st.download_button(
+                            label="📄 下載最高危害瞬間人因評估單 (.html / PDF)",
+                            data=peak_report_html.encode("utf-8"),
+                            file_name=f"PeakReport_{method}_{uploaded_video.name}.html",
+                            mime="text/html",
+                            key="dl_peak_report"
+                        )
 
                 # 下載完整 CSV
                 import io

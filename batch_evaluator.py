@@ -269,11 +269,11 @@ class BatchEvaluator:
             print(f"[錯誤] 處理影片失敗 {fname}: {e}")
             return None
 
-        # 儲存最高風險影格截圖
+        # 儲存最高風險影格截圖 (支援 Windows 中文路徑)
         peak_img_path = ""
         if res["peak_risk_image"] is not None:
             peak_img_path = os.path.join(self.output_dir, f"peak_{base_name}.jpg")
-            cv2.imwrite(peak_img_path, res["peak_risk_image"])
+            cv2.imencode(".jpg", res["peak_risk_image"])[1].tofile(peak_img_path)
 
         peak_rec = res["peak_risk_record"] or {}
 
@@ -379,7 +379,7 @@ def main():
     elif args.load_kg <= 10.0:
         rula_force = 2 if (args.muscle_use or args.load_shock) else 1
     else:
-        rula_force = 3 if (args.muscle_use or args.load_shock) else 2
+        rula_force = 3
 
     modifiers = {
         "load_weight_kg": args.load_kg,

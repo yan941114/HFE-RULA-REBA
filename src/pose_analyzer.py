@@ -221,18 +221,69 @@ class PoseAnalyzer:
 
         return "right"  # 預設面向右側
 
+    def _calculate_side_angles(self,
+                               xy: np.ndarray,
+                               conf: np.ndarray,
+                               is_left: bool,
+                               v_trunk: np.ndarray,
+                               fwd_sign: float,
+                               trunk_angle: float,
+                               neck_angle: float) -> Dict[str, float]:
+        """計算單一肢體側（左側或右側）之肢體關節角度"""
+        sh_idx = KP_L_SHOULDER if is_left else KP_R_SHOULDER
+        el_idx = KP_L_ELBOW if is_left else KP_R_ELBOW
+        wr_idx = KP_L_WRIST if is_left else KP_R_WRIST
+        hip_idx = KP_L_HIP if is_left else KP_R_HIP
+        knee_idx = KP_L_KNEE if is_left else KP_R_KNEE
+        ank_idx = KP_L_ANKLE if is_left else KP_R_ANKLE
+
+        # 上臂屈伸 (Upper Arm Flexion/Extension)
+        v_upper_arm = xy[el_idx] - xy[sh_idx]
+        v_trunk_down = -v_trunk
+        ua_mag = angle_between_vectors(v_upper_arm, v_trunk_down) or 0.0
+        cross_ua = -(v_trunk_down[0] * v_upper_arm[1] - v_trunk_down[1] * v_upper_arm[0]) * fwd_sign
+        upper_arm_angle = ua_mag if cross_ua >= 0 else -ua_mag
+
+        # 前臂屈曲 (Lower Arm Angle / Elbow Flexion)
+        v_upper_ext = xy[el_idx] - xy[sh_idx]
+        v_forearm = xy[wr_idx] - xy[el_idx]
+        elbow_flexion = angle_between_vectors(v_forearm, v_upper_ext)
+        lower_arm_angle = elbow_flexion if elbow_flexion is not None else 90.0
+
+        # 手腕角度 (預設 0°)
+        wrist_angle = 0.0
+
+        # 膝關節彎曲 (Knee Flexion)
+        v_thigh = xy[hip_idx] - xy[knee_idx]
+        v_shank = xy[ank_idx] - xy[knee_idx]
+        leg_joint_angle = angle_between_vectors(v_thigh, v_shank)
+        knee_angle = max(0.0, 180.0 - leg_joint_angle) if leg_joint_angle is not None else 0.0
+
+        return {
+            "trunk": float(round(trunk_angle, 1)),
+            "neck": float(round(neck_angle, 1)),
+            "upper_arm": float(round(upper_arm_angle, 1)),
+            "lower_arm": float(round(lower_arm_angle, 1)),
+            "wrist": float(round(wrist_angle, 1)),
+            "knee": float(round(knee_angle, 1)),
+        }
+
     def calculate_body_angles(self,
                               xy: np.ndarray,
                               conf: np.ndarray,
                               side: str = "auto",
-                              smooth: bool = False) -> Tuple[Dict[str, float], str, Dict[str, Any]]:
+                              smooth: bool = False,
+                              manual_modifiers: Optional[Dict[str, Any]] = None,
+                              method: str = "RULA") -> Tuple[Dict[str, float], str, Dict[str, Any]]:
         """
-        從 17 關鍵點計算人體工學關節角度 (具備正負方向性)
+        從 17 關鍵點計算人體工學關節角度 (支援雙側同步評估與身體不對稱分析)
 
         :param xy: (17, 2) 座標
         :param conf: (17,) 信心度
-        :param side: 'auto', 'left', 'right'
+        :param side: 'auto', 'worst', 'left', 'right'
         :param smooth: 是否套用時序平滑化 (EMA)
+        :param manual_modifiers: 專家負重/環境參數
+        :param method: 'RULA' 或 'REBA'
         :return: (angles_dict, side_used, diagnostics)
         """
         facing = self.estimate_facing_direction(xy, conf)
@@ -244,34 +295,17 @@ class PoseAnalyzer:
         left_conf = float(np.mean([conf[i] for i in left_pts]))
         right_conf = float(np.mean([conf[i] for i in right_pts]))
 
-        if side == "auto":
-            # 優先選擇信心度較高側 (避免側面拍攝時被身體遮擋的手臂飄移)
-            side_used = "left" if left_conf >= right_conf else "right"
-        else:
-            side_used = side.lower()
-
-        is_left = (side_used == "left")
-        sh_idx = KP_L_SHOULDER if is_left else KP_R_SHOULDER
-        el_idx = KP_L_ELBOW if is_left else KP_R_ELBOW
-        wr_idx = KP_L_WRIST if is_left else KP_R_WRIST
-        hip_idx = KP_L_HIP if is_left else KP_R_HIP
-        knee_idx = KP_L_KNEE if is_left else KP_R_KNEE
-        ank_idx = KP_L_ANKLE if is_left else KP_R_ANKLE
-
         # 前向方向向量 (Forward sign for Flexion/Extension)
-        # 影像座標中，x 向右為正；若面向 right，forward_x 為 +1，若面向 left，forward_x 為 -1
         fwd_sign = 1.0 if facing == "right" else (-1.0 if facing == "left" else 1.0)
 
         # 1. 軀幹向量 (Trunk Vector: Pelvis -> Shoulder_mid)
         pelvis = midpoint(xy[KP_L_HIP], xy[KP_R_HIP])
         shoulder_mid = midpoint(xy[KP_L_SHOULDER], xy[KP_R_SHOULDER])
-        v_trunk = shoulder_mid - pelvis  # 從髖指向上
+        v_trunk = shoulder_mid - pelvis
 
-        # 向上垂直向量 (Vertical Up in image coords is [0, -1])
+        # 向上垂直向量
         v_up = np.array([0.0, -1.0], dtype=np.float32)
         trunk_mag = angle_between_vectors(v_trunk, v_up) or 0.0
-
-        # 軀幹前屈 vs 後仰判定: 檢查肩中點相對骨盆在前向的偏移
         trunk_dx = (shoulder_mid[0] - pelvis[0]) * fwd_sign
         trunk_angle = trunk_mag if trunk_dx >= 0 else -trunk_mag
 
@@ -281,50 +315,60 @@ class PoseAnalyzer:
             head_pt = midpoint(xy[KP_L_EAR], xy[KP_R_EAR])
         v_neck = head_pt - shoulder_mid
         neck_relative = angle_between_vectors(v_neck, v_trunk) or 0.0
-
-        # 利用 2D 外積 (Cross Product) 判斷相對旋轉方向，不受大角度彎腰影響
-        # 影像座標系 (X向右, Y向下)：當面向右側 (fwd_sign > 0) 時，
-        # 向量順時針旋轉 (前屈 Flexion) 的 2D cross (ref_x * v_y - ref_y * v_x) 為正值
         cross_neck = (v_trunk[0] * v_neck[1] - v_trunk[1] * v_neck[0]) * fwd_sign
         neck_angle = neck_relative if cross_neck >= 0 else -neck_relative
 
-        # 3. 上臂屈伸 (Upper Arm Flexion/Extension)
-        # 向量: 肩膀 -> 手肘，參考軀幹向下方向 (v_trunk_down)
-        v_upper_arm = xy[el_idx] - xy[sh_idx]
-        v_trunk_down = -v_trunk
-        ua_mag = angle_between_vectors(v_upper_arm, v_trunk_down) or 0.0
+        # 3. 雙側同步計算肢體角度
+        left_angles = self._calculate_side_angles(xy, conf, True, v_trunk, fwd_sign, trunk_angle, neck_angle)
+        right_angles = self._calculate_side_angles(xy, conf, False, v_trunk, fwd_sign, trunk_angle, neck_angle)
 
-        # 上臂向前抬起時，相對於向下的軀幹向量是逆時針旋轉，加負號使前屈為正
-        cross_ua = -(v_trunk_down[0] * v_upper_arm[1] - v_trunk_down[1] * v_upper_arm[0]) * fwd_sign
-        upper_arm_angle = ua_mag if cross_ua >= 0 else -ua_mag
+        # 雙側即時試算分數 (用於 Worst-Case 判斷與不對稱分析)
+        is_reba = (method.upper() == "REBA")
+        if is_reba:
+            left_eval = calculate_reba(left_angles, manual_modifiers)
+            right_eval = calculate_reba(right_angles, manual_modifiers)
+            left_score = left_eval.get("final_reba_score", 1)
+            right_score = right_eval.get("final_reba_score", 1)
+        else:
+            left_eval = calculate_rula(left_angles, manual_modifiers)
+            right_eval = calculate_rula(right_angles, manual_modifiers)
+            left_score = left_eval.get("grand_score", 1)
+            right_score = right_eval.get("grand_score", 1)
 
-        # 4. 前臂屈曲 (Lower Arm Angle / Elbow Flexion)
-        # 基準：計算上臂延伸方向 (肩膀 -> 手肘) 與前臂向量 (手肘 -> 手腕) 之屈曲角
-        # 手臂完全伸直為 0° (在 RULA/REBA 得 2 分)；手肘彎曲成直角為 90° (在 60°~100° 區間得 1 分)
-        v_upper_ext = xy[el_idx] - xy[sh_idx]  # 肩膀指向手肘 (0度伸展基準)
-        v_forearm = xy[wr_idx] - xy[el_idx]    # 手肘指向手腕
-        elbow_flexion = angle_between_vectors(v_forearm, v_upper_ext)
-        lower_arm_angle = elbow_flexion if elbow_flexion is not None else 90.0
+        # 側別選擇邏輯 (支援 Auto, Worst, Left, Right)
+        side_choice = (side or "auto").lower()
+        if "worst" in side_choice or "high" in side_choice or "危" in side_choice:
+            # 保守人因評估原則：自動取較高危害側
+            side_used = "left" if left_score >= right_score else "right"
+        elif side_choice == "left":
+            side_used = "left"
+        elif side_choice == "right":
+            side_used = "right"
+        else:  # auto: 預設選取視野可信度最高側
+            side_used = "left" if left_conf >= right_conf else "right"
 
-        # 5. 手腕角度 (Wrist Angle)
-        # 由於 COCO-17 僅標註到手腕點，手腕屈曲若無法精準辨識則預設為接近中立位 (0°)
-        wrist_angle = 0.0
+        # 身體不對稱分析 (Bilateral Asymmetry Analysis)
+        v_sh = xy[KP_R_SHOULDER] - xy[KP_L_SHOULDER]
+        sh_deg = abs(float(np.degrees(np.arctan2(v_sh[1], v_sh[0]))))
+        shoulder_tilt = abs(180.0 - sh_deg) if sh_deg > 90.0 else sh_deg
 
-        # 6. 膝關節彎曲 (Knee Flexion)
-        # 站立伸直時夾角 180° -> 屈曲 0°；深蹲彎曲 90° -> 屈曲 90°
-        v_thigh = xy[hip_idx] - xy[knee_idx]
-        v_shank = xy[ank_idx] - xy[knee_idx]
-        leg_joint_angle = angle_between_vectors(v_thigh, v_shank)
-        knee_angle = max(0.0, 180.0 - leg_joint_angle) if leg_joint_angle is not None else 0.0
+        score_diff = abs(left_score - right_score)
+        arm_diff = abs(left_angles["upper_arm"] - right_angles["upper_arm"])
+        asymmetry_alert = False
+        asymmetry_reason = ""
 
-        raw_angles = {
-            "trunk": float(round(trunk_angle, 1)),
-            "neck": float(round(neck_angle, 1)),
-            "upper_arm": float(round(upper_arm_angle, 1)),
-            "lower_arm": float(round(lower_arm_angle, 1)),
-            "wrist": float(round(wrist_angle, 1)),
-            "knee": float(round(knee_angle, 1)),
-        }
+        if conf[KP_L_SHOULDER] >= self.conf_thres and conf[KP_R_SHOULDER] >= self.conf_thres:
+            if score_diff >= 2:
+                asymmetry_alert = True
+                asymmetry_reason = f"左右側危害評分差距達 {score_diff} 分 (左: {left_score}分 vs. 右: {right_score}分)"
+            elif shoulder_tilt >= 10.0:
+                asymmetry_alert = True
+                asymmetry_reason = f"雙肩高低差傾斜達 {shoulder_tilt:.1f}°，作業員呈現單側代償代工姿勢"
+            elif arm_diff >= 35.0:
+                asymmetry_alert = True
+                asymmetry_reason = f"雙手上臂抬升角度差距達 {arm_diff:.1f}° (左: {left_angles['upper_arm']:+.0f}° vs. 右: {right_angles['upper_arm']:+.0f}°)"
+
+        raw_angles = left_angles if side_used == "left" else right_angles
 
         # 時序平滑 (EMA) 避免跳動
         if smooth and self.prev_angles:
@@ -343,7 +387,15 @@ class PoseAnalyzer:
             "side_used": side_used,
             "left_confidence": round(left_conf, 2),
             "right_confidence": round(right_conf, 2),
-            "occluded_warning": (left_conf < self.conf_thres if is_left else right_conf < self.conf_thres)
+            "left_angles": left_angles,
+            "right_angles": right_angles,
+            "left_score": left_score,
+            "right_score": right_score,
+            "score_diff": score_diff,
+            "shoulder_tilt": round(shoulder_tilt, 1),
+            "asymmetry_alert": asymmetry_alert,
+            "asymmetry_reason": asymmetry_reason,
+            "occluded_warning": (left_conf < self.conf_thres if side_used == "left" else right_conf < self.conf_thres)
         }
 
         return final_angles, side_used, diagnostics
@@ -353,15 +405,17 @@ class PoseAnalyzer:
                       side: str = "auto",
                       method: str = "RULA",
                       manual_modifiers: Optional[Dict[str, Any]] = None,
-                      draw_hud: bool = False) -> Optional[Dict[str, Any]]:
+                      draw_hud: bool = False,
+                      show_angle_labels: bool = False) -> Optional[Dict[str, Any]]:
         """
         完整分析單張影像：姿態偵測 -> 角度計算 -> RULA/REBA 評分 -> 繪製骨架
 
         :param image_bgr: 輸入 BGR 影像
-        :param side: 'auto', 'left', 'right'
+        :param side: 'auto', 'worst', 'left', 'right'
         :param method: 'RULA' 或 'REBA'
         :param manual_modifiers: 專家負重/環境參數
         :param draw_hud: 是否在影像左上角繪製抬頭顯示卡 (預設 False，保持畫面乾淨)
+        :param show_angle_labels: 是否在肩膀、手肘等關鍵節點旁繪製半透明角度標籤
         :return: 包含標註影像、角度、評分結果之字典
         """
         detection = self.extract_keypoints(image_bgr)
@@ -369,7 +423,9 @@ class PoseAnalyzer:
             return None
 
         xy, conf, bbox = detection
-        angles, side_used, diag = self.calculate_body_angles(xy, conf, side=side, smooth=False)
+        angles, side_used, diag = self.calculate_body_angles(
+            xy, conf, side=side, smooth=False, manual_modifiers=manual_modifiers, method=method
+        )
 
         # 執行查表評估
         if method.upper() == "REBA":
@@ -382,7 +438,10 @@ class PoseAnalyzer:
             level = assessment_result["action_level"]
 
         # 標註骨架疊圖 (預設不畫黃色 HUD 框，完整呈現全身雙側節點)
-        annotated_img = self.render_overlay(image_bgr, xy, conf, side_used, assessment_result, angles, draw_hud=draw_hud)
+        annotated_img = self.render_overlay(
+            image_bgr, xy, conf, side_used, assessment_result, angles,
+            draw_hud=draw_hud, show_angle_labels=show_angle_labels
+        )
 
         return {
             "assessment_result": assessment_result,
@@ -402,11 +461,13 @@ class PoseAnalyzer:
                        side_used: str,
                        assessment: Dict[str, Any],
                        angles: Dict[str, float],
-                       draw_hud: bool = False) -> np.ndarray:
+                       draw_hud: bool = False,
+                       show_angle_labels: bool = False) -> np.ndarray:
         """
-        在影像上繪製完整人體骨架（包含雙側肢體與關節節點），並可依需求疊加資訊看板
+        在影像上繪製完整人體骨架（包含雙側肢體與關節節點），並可依需求疊加資訊看板或關節角度標籤
 
         :param draw_hud: 若為 False 則僅繪製乾淨人體骨架連線與節點；若為 True 則在左上角繪製英文資訊卡
+        :param show_angle_labels: 是否在關節節點旁繪製幾何角度數值標籤膠囊
         """
         out = img.copy()
         h, w = out.shape[:2]
@@ -492,6 +553,33 @@ class PoseAnalyzer:
                     cv2.circle(out, pt, 5, (0, 215, 255), -1, cv2.LINE_AA)
                     cv2.circle(out, pt, 6, (255, 255, 255), 1, cv2.LINE_AA)
 
+        # 繪製選用之關節角度科技膠囊標籤 (Angle Badges)
+        if show_angle_labels:
+            sh_idx = KP_L_SHOULDER if is_left_active else KP_R_SHOULDER
+            el_idx = KP_L_ELBOW if is_left_active else KP_R_ELBOW
+            hip_idx = KP_L_HIP if is_left_active else KP_R_HIP
+
+            label_items = [
+                (KP_NOSE, f"Neck {angles.get('neck', 0.0):+.0f}deg", (12, -12)),
+                (sh_idx, f"Arm {angles.get('upper_arm', 0.0):+.0f}deg", (12, -8)),
+                (el_idx, f"Elbow {angles.get('lower_arm', 0.0):.0f}deg", (12, 10)),
+                (hip_idx, f"Trunk {angles.get('trunk', 0.0):+.0f}deg", (12, 12))
+            ]
+
+            for k_idx, txt, (dx, dy) in label_items:
+                if conf[k_idx] >= self.conf_thres:
+                    px = int(xy[k_idx][0]) + dx
+                    py = int(xy[k_idx][1]) + dy
+                    # 邊界保護
+                    px = max(10, min(w - 110, px))
+                    py = max(20, min(h - 10, py))
+                    (tw, th), _ = cv2.getTextSize(txt, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
+                    overlay_pill = out.copy()
+                    cv2.rectangle(overlay_pill, (px - 3, py - th - 3), (px + tw + 3, py + 3), (20, 20, 20), -1)
+                    cv2.addWeighted(overlay_pill, 0.65, out, 0.35, 0, out)
+                    cv2.rectangle(out, (px - 3, py - th - 3), (px + tw + 3, py + 3), risk_color, 1)
+                    cv2.putText(out, txt, (px, py), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+
         # 3. 若未啟用 draw_hud，直接回傳乾淨的骨架影像 (不遮擋工人與機台)
         if not draw_hud:
             return out
@@ -530,7 +618,8 @@ class PoseAnalyzer:
                       manual_modifiers: Optional[Dict[str, Any]] = None,
                       sample_interval: int = 1,
                       output_annotated_path: Optional[str] = None,
-                      draw_hud: bool = False) -> Dict[str, Any]:
+                      draw_hud: bool = False,
+                      show_angle_labels: bool = False) -> Dict[str, Any]:
         """
         處理影片時間序列：逐幀分析、EMA 平滑、統計時長佔比、偵測最高風險瞬間 (Peak Risk Frame)
 
@@ -573,7 +662,9 @@ class PoseAnalyzer:
                 det = self.extract_keypoints(frame)
                 if det is not None:
                     xy, conf, bbox = det
-                    angles, side_used, diag = self.calculate_body_angles(xy, conf, side=side, smooth=True)
+                    angles, side_used, diag = self.calculate_body_angles(
+                        xy, conf, side=side, smooth=True, manual_modifiers=manual_modifiers, method=method
+                    )
 
                     if method.upper() == "REBA":
                         res = calculate_reba(angles, manual_modifiers)
@@ -584,7 +675,10 @@ class PoseAnalyzer:
                         score = res["grand_score"]
                         level = res["action_level"]
 
-                    annotated = self.render_overlay(frame, xy, conf, side_used, res, angles, draw_hud=draw_hud)
+                    annotated = self.render_overlay(
+                        frame, xy, conf, side_used, res, angles,
+                        draw_hud=draw_hud, show_angle_labels=show_angle_labels
+                    )
                     if writer:
                         writer.write(annotated)
 

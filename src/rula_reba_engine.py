@@ -18,7 +18,7 @@ rula_reba_engine.py
 - REBA: Hignett & McAtamney (2000)
 """
 
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional, List
 import numpy as np
 
 
@@ -767,17 +767,190 @@ def flatten_assessment_result(res: Dict[str, Any]) -> Dict[str, Any]:
         "legs_score": gb["legs"]["final_score"] if not is_reba else ga["legs"]["final_score"],
         "posture_score_a": ga["posture_score_a"],
         "posture_score_b": gb["posture_score_b"],
+        "table_a_score": ga["posture_score_a"],  # UI 別名
+        "table_b_score": gb["posture_score_b"],  # UI 別名
     }
     if is_reba:
         flat["load_score"] = ga["load_score"]
         flat["coupling_score"] = gb["coupling_score"]
+        flat["score_a"] = ga["score_a"]          # REBA Score A
+        flat["score_b"] = gb["score_b"]          # REBA Score B
         flat["score_c"] = res["score_c"]
         flat["activity_score"] = res["activity_score"]
     else:
         flat["score_c"] = ga["score_c"]
         flat["score_d"] = gb["score_d"]
+        flat["wrist_arm_score"] = ga["score_c"]  # RULA Score C 別名
+        flat["neck_trunk_score"] = gb["score_d"] # RULA Score D 別名
 
     return flat
+
+
+# ==============================================================================
+# What-If 人因工程根因診斷與改善模擬器 (Sensitivity Analysis & Simulator)
+# ==============================================================================
+
+def simulate_what_if_improvements(auto_angles: Dict[str, float],
+                                 manual_modifiers: Optional[Dict[str, Any]] = None,
+                                 method: str = "RULA") -> List[Dict[str, Any]]:
+    """
+    【What-If 人因工程根因診斷與改善模擬器】
+    針對當前不良姿勢，以敏感度分析（Sensitivity Analysis）模擬常見工程與管理改善措施：
+    1. 調整工作台高度改善軀幹前傾 (Trunk Neutralization)
+    2. 調整視野或工件視角改善頸部屈曲 (Neck Neutralization)
+    3. 提供前臂扶手/彈簧吊臂支撐以降低上臂抬升 (Upper Arm Support)
+    4. 減輕單次手持重量或改用升降台車 (Load Reduction)
+    5. 改善工具把手品質 (REBA Coupling Improvement)
+    6. 消除高頻重複與靜態維持 (Repetition/Static Reduction)
+
+    :return: 依改善效益（總分降低幅度與行動水準降級）由高到低排列之建議清單
+    """
+    base_m = dict(manual_modifiers or {})
+    is_reba = (method.upper() == "REBA")
+
+    # 基準分數
+    if is_reba:
+        base_res = calculate_reba(auto_angles, base_m)
+        base_score = base_res["final_reba_score"]
+        base_al = base_res["action_level"]
+    else:
+        base_res = calculate_rula(auto_angles, base_m)
+        base_score = base_res["grand_score"]
+        base_al = base_res["action_level"]
+
+    scenarios: List[Dict[str, Any]] = []
+
+    # 1. 改善軀幹姿勢 (例如墊高或降低機台高度，使軀幹前傾回正至 0~10度)
+    cur_trunk = auto_angles.get("trunk", 0.0)
+    if abs(cur_trunk) > 15.0:
+        sim_ang = dict(auto_angles)
+        sim_ang["trunk"] = 5.0
+        res = calculate_reba(sim_ang, base_m) if is_reba else calculate_rula(sim_ang, base_m)
+        score = res["final_reba_score"] if is_reba else res["grand_score"]
+        al = res["action_level"]
+        diff = base_score - score
+        if diff > 0:
+            scenarios.append({
+                "category": "軀幹工程改善",
+                "action": f"調整作業台或輸送帶高度，將軀幹前傾由 {cur_trunk:+.1f}° 改善至接近直立 (<15°)",
+                "new_score": score,
+                "score_drop": diff,
+                "new_action_level": al,
+                "level_drop": base_al - al,
+                "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
+            })
+
+    # 2. 改善頸部姿勢 (調整視野高度或螢幕/夾具視角，使頸部低頭由 >20度 降至 10度以內)
+    cur_neck = auto_angles.get("neck", 0.0)
+    if cur_neck > 15.0 or cur_neck < -5.0:
+        sim_ang = dict(auto_angles)
+        sim_ang["neck"] = 10.0
+        res = calculate_reba(sim_ang, base_m) if is_reba else calculate_rula(sim_ang, base_m)
+        score = res["final_reba_score"] if is_reba else res["grand_score"]
+        al = res["action_level"]
+        diff = base_score - score
+        if diff > 0:
+            scenarios.append({
+                "category": "視野與視角調整",
+                "action": f"增設傾斜夾具或調升視野高度，將頸部前傾由 {cur_neck:+.1f}° 改善至舒適區 (約 10°)",
+                "new_score": score,
+                "score_drop": diff,
+                "new_action_level": al,
+                "level_drop": base_al - al,
+                "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
+            })
+
+    # 3. 提供手臂支撐架或降低上臂抬升角度
+    cur_uarm = auto_angles.get("upper_arm", 0.0)
+    has_arm_support = base_m.get("arm_supported", False)
+    if abs(cur_uarm) > 20.0 or not has_arm_support:
+        sim_ang = dict(auto_angles)
+        sim_m = dict(base_m)
+        sim_ang["upper_arm"] = 15.0
+        sim_m["arm_supported"] = True
+        res = calculate_reba(sim_ang, sim_m) if is_reba else calculate_rula(sim_ang, sim_m)
+        score = res["final_reba_score"] if is_reba else res["grand_score"]
+        al = res["action_level"]
+        diff = base_score - score
+        if diff > 0:
+            scenarios.append({
+                "category": "上肢扶手與取放優化",
+                "action": "提供前臂扶手/彈簧吊臂支撐，並將工件拉近以降低上臂抬升與外展角度",
+                "new_score": score,
+                "score_drop": diff,
+                "new_action_level": al,
+                "level_drop": base_al - al,
+                "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
+            })
+
+    # 4. 減輕手持負重或改用機械輔助升降工具 (若原本負重 > 2kg)
+    cur_load = base_m.get("load_weight_kg", 0.0)
+    if cur_load >= 2.0:
+        sim_m = dict(base_m)
+        sim_m["load_weight_kg"] = 0.0
+        sim_m["force_load_a"] = 0
+        sim_m["force_load_b"] = 0
+        res = calculate_reba(auto_angles, sim_m) if is_reba else calculate_rula(auto_angles, sim_m)
+        score = res["final_reba_score"] if is_reba else res["grand_score"]
+        al = res["action_level"]
+        diff = base_score - score
+        if diff > 0:
+            scenarios.append({
+                "category": "物料搬運減重",
+                "action": f"導入平衡吊車、升降台車或分批拆裝，將手持負重由 {cur_load:.1f}kg 降至 <2kg",
+                "new_score": score,
+                "score_drop": diff,
+                "new_action_level": al,
+                "level_drop": base_al - al,
+                "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
+            })
+
+    # 5. 改善握把品質 (REBA Coupling)
+    if is_reba and base_m.get("coupling_score", 0) > 0:
+        sim_m = dict(base_m)
+        sim_m["coupling_score"] = 0
+        res = calculate_reba(auto_angles, sim_m)
+        score = res["final_reba_score"]
+        al = res["action_level"]
+        diff = base_score - score
+        if diff > 0:
+            scenarios.append({
+                "category": "工具握把人因改善",
+                "action": "加裝符合人體工學之防滑舒適握把，將抓握等級提升至良好 (Good Coupling)",
+                "new_score": score,
+                "score_drop": diff,
+                "new_action_level": al,
+                "level_drop": base_al - al,
+                "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
+            })
+
+    # 6. 消除靜態維持與高頻重複 (作業輪調或微休)
+    if (base_m.get("activity_static", False) or
+        base_m.get("activity_repeated", False) or
+        base_m.get("muscle_use_a", 0) > 0):
+        sim_m = dict(base_m)
+        sim_m["activity_static"] = False
+        sim_m["activity_repeated"] = False
+        sim_m["muscle_use_a"] = 0
+        sim_m["muscle_use_b"] = 0
+        res = calculate_reba(auto_angles, sim_m) if is_reba else calculate_rula(auto_angles, sim_m)
+        score = res["final_reba_score"] if is_reba else res["grand_score"]
+        al = res["action_level"]
+        diff = base_score - score
+        if diff > 0:
+            scenarios.append({
+                "category": "工時與作業輪調",
+                "action": "實施每工作 30 分鐘微歇 30 秒，或跨工位輪調，消除持續靜態肌肉維持與高頻重複",
+                "new_score": score,
+                "score_drop": diff,
+                "new_action_level": al,
+                "level_drop": base_al - al,
+                "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
+            })
+
+    # 依改善分數幅度排序 (由高到低)
+    scenarios.sort(key=lambda x: (x["score_drop"], x["level_drop"]), reverse=True)
+    return scenarios
 
 
 # ==============================================================================
