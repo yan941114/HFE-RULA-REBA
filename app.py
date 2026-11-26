@@ -362,19 +362,22 @@ with tab_photo:
                 # AI What-If 改善模擬器 (敏感度分析與改善效益排序)
                 what_if_scenarios = simulate_what_if_improvements(angles, manual_modifiers, method=method)
                 with st.expander("💡 AI 自動根因診斷與改善模擬 (What-If Simulation)", expanded=True):
-                    st.markdown("**🎯 改善效益排序與敏感度分析（AI 自動試算中立位效益）：**")
-                    for idx, sc in enumerate(what_if_scenarios, 1):
-                        delta = sc["score_delta"]
-                        badge = f"🔥 總分 -{delta} 分 (效益顯著)" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平 (0分)")
-                        st.markdown(f"**{idx}. {sc['part']}** ｜ `{badge}`")
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **模擬操作**：{sc['modification']}")
-                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **預期結果**：總分降至 **{sc['new_score']} 分** (行動水準 AL {sc['new_action_level']}) ｜ {sc['improvement_note']}")
+                    if what_if_scenarios:
+                        st.markdown("**🎯 改善效益排序與敏感度分析（AI 自動試算中立位效益）：**")
+                        for idx, sc in enumerate(what_if_scenarios, 1):
+                            delta = sc["score_drop"]
+                            badge = f"🔥 總分 -{delta} 分 (效益顯著)" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平 (0分)")
+                            st.markdown(f"**{idx}. {sc['category']}** ｜ `{badge}`")
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **模擬操作**：{sc['action']}")
+                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **預期結果**：總分降至 **{sc['new_score']} 分** (行動水準 AL {sc['new_action_level']}) ｜ {sc.get('priority', '')}")
+                    else:
+                        st.info("當前姿勢各項關鍵角度均接近建議中立位，暫無顯著降分改善項目。")
 
                 # 下載正式人因工程單頁評估單 (HTML / PDF)
                 html_report = generate_html_report(
-                    assessment=ass,
+                    assessment_result=ass,
                     angles=angles,
-                    annotated_img_bgr=res["annotated_image"],
+                    annotated_bgr=res["annotated_image"],
                     method=method,
                     manual_modifiers=manual_modifiers,
                     what_if_scenarios=what_if_scenarios,
@@ -526,23 +529,22 @@ with tab_video:
                         })
                         peak_what_if = simulate_what_if_improvements(peak_angles, manual_modifiers, method=method)
                         with st.expander("💡 峰值瞬間 AI 改善模擬 (What-If Simulation)", expanded=False):
-                            for idx, sc in enumerate(peak_what_if, 1):
-                                delta = sc["score_delta"]
-                                badge = f"🔥 總分 -{delta} 分" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平")
-                                st.markdown(f"**{idx}. {sc['part']}** ({badge}): {sc['modification']} ➜ 總分降至 **{sc['new_score']} 分** (AL {sc['new_action_level']})")
+                            if peak_what_if:
+                                for idx, sc in enumerate(peak_what_if, 1):
+                                    delta = sc["score_drop"]
+                                    badge = f"🔥 總分 -{delta} 分" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平")
+                                    st.markdown(f"**{idx}. {sc['category']}** ({badge}): {sc['action']} ➜ 總分降至 **{sc['new_score']} 分** (AL {sc['new_action_level']})")
+                            else:
+                                st.info("當前姿勢各項關鍵角度均接近建議中立位，暫無顯著降分改善項目。")
+
+                        # 計算完整峰值評估字典 (確保報告具備完整 Table A / B / C 拆解與 action_description)
+                        peak_ass = calculate_reba(peak_angles, manual_modifiers) if method == "REBA" else calculate_rula(peak_angles, manual_modifiers)
 
                         # 下載最高危害瞬間正式人因報告
                         peak_report_html = generate_html_report(
-                            assessment={
-                                "assessment": method,
-                                "grand_score": peak_score,
-                                "final_reba_score": peak_score,
-                                "action_level": peak_al,
-                                "risk_level": peak_risk,
-                                "action_description": peak_rec.get("action_description", "")
-                            },
+                            assessment_result=peak_ass,
                             angles=peak_angles,
-                            annotated_img_bgr=peak_img,
+                            annotated_bgr=peak_img,
                             method=method,
                             manual_modifiers=manual_modifiers,
                             what_if_scenarios=peak_what_if,
