@@ -347,7 +347,7 @@ def generate_html_report(assessment_result: Dict[str, Any],
                 <tr><td>上臂 (Upper Arm)</td><td><strong>{angles.get('upper_arm', 0.0):+.1f}°</strong></td><td>{assessment_result.get('group_a', {}).get('upper_arm', {}).get('final_score', assessment_result.get('group_b', {}).get('upper_arm', {}).get('final_score', '-'))} 分</td></tr>
                 <tr><td>前臂手肘 (Lower Arm)</td><td><strong>{angles.get('lower_arm', 0.0):.1f}°</strong></td><td>{assessment_result.get('group_a', {}).get('lower_arm', {}).get('final_score', assessment_result.get('group_b', {}).get('lower_arm', {}).get('final_score', '-'))} 分</td></tr>
                 <tr><td>手腕 (Wrist)</td><td><strong>{angles.get('wrist', 0.0):.1f}°</strong></td><td>{assessment_result.get('group_a', {}).get('wrist', {}).get('final_score', assessment_result.get('group_b', {}).get('wrist', {}).get('final_score', '-'))} 分</td></tr>
-                <tr><td>膝關節 (Knee)</td><td><strong>{angles.get('knee', 0.0):.1f}°</strong></td><td>{assessment_result.get('group_b', {}).get('legs', {}).get('final_score', assessment_result.get('group_a', {}).get('legs', {}).get('final_score', '-'))} 分</td></tr>
+                <tr><td>{'膝關節彎曲 (Knee)' if is_reba else '膝關節角度 (僅供參考，RULA 不計分)'}</td><td><strong>{angles.get('knee', 0.0):.1f}°</strong></td><td>{(str(assessment_result.get('group_a', {}).get('legs', {}).get('final_score', '-')) + ' 分 (含腿部)') if is_reba else '不適用 (僅測支撐平衡)'}</td></tr>
             </table>
 
             <div class="panel-title" style="margin-top: 10px;">📊 查表矩陣拆解 (Table Matrix)</div>

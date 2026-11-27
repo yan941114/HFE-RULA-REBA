@@ -33,6 +33,7 @@ from src.live_monitor_core import LiveErgoSession
 from src.rula_reba_engine import (
     calculate_rula,
     calculate_reba,
+    compute_rula_force_score,
     flatten_assessment_result,
     simulate_what_if_improvements,
 )
@@ -121,9 +122,9 @@ st.sidebar.image("https://img.icons8.com/color/96/worker-male.png", width=64)
 st.sidebar.title("人因評估參數設定")
 
 method = st.sidebar.radio(
-    "評估量表 (Assessment Method)",
+    "骨架著色與批次驗證主量表",
     options=["RULA", "REBA"],
-    help="RULA 偏向上肢與坐姿負荷；REBA 偏向全身、搬運與站姿負荷。"
+    help="照片、影片與即時監測模式皆會【同步計算 RULA 與 REBA】；此選項用於決定骨架疊圖主色與批次驗證基準。"
 )
 
 side_choice = st.sidebar.selectbox(
@@ -160,15 +161,12 @@ with col_m1:
 with col_m2:
     act_repeat = st.checkbox("動作高頻重複 > 4次/分")
 
-act_rapid = False
-coupling_score = 0
-if method == "REBA":
-    act_rapid = st.sidebar.checkbox("姿勢劇烈變動或基底不穩")
-    coupling_score = st.sidebar.selectbox(
-        "握把耦合程度 (Coupling Quality)",
-        options=[0, 1, 2, 3],
-        format_func=lambda x: ["0: 良好 (舒適握把與中等握力)", "1: 尚可 (可握但不理想)", "2: 差 (勉強能抓但易滑脫)", "3: 危險 (無握把或不安全)"][x]
-    )
+act_rapid = st.sidebar.checkbox("姿勢劇烈變動或基底不穩 (REBA 專用)")
+coupling_score = st.sidebar.selectbox(
+    "握把耦合程度 (REBA 專用)",
+    options=[0, 1, 2, 3],
+    format_func=lambda x: ["0: 良好 (舒適握把與中等握力)", "1: 尚可 (可握但不理想)", "2: 差 (勉強能抓但易滑脫)", "3: 危險 (無握把或不安全)"][x]
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("姿勢與環境人工補正")
@@ -176,12 +174,16 @@ with st.sidebar.expander("進階姿態補正項 (進一步微調)", expanded=Fal
     shoulder_raised = st.checkbox("肩膀明顯聳起 (+1)")
     arm_abducted = st.checkbox("手臂外展或側向張開 (+1)")
     arm_supported = st.checkbox("手臂有支撐或有扶手 (-1)")
+    across_midline = st.checkbox("前臂越過身體中線 (+1，RULA 專用)")
+    out_to_side = st.checkbox("前臂向身體外側張開 (+1，RULA 專用)")
     wrist_deviated = st.checkbox("手腕側偏 (橈偏/尺偏) (+1)")
     wrist_twist = st.selectbox("手腕扭轉程度", options=[1, 2], format_func=lambda x: "中立範圍 (1分)" if x == 1 else "極限旋轉 (2分)")
     trunk_twisted = st.checkbox("軀幹扭轉 (+1)")
     trunk_side_bending = st.checkbox("軀幹側彎 (+1)")
     neck_twisted = st.checkbox("頸部扭轉 (+1)")
     neck_side_bending = st.checkbox("頸部側彎 (+1)")
+    is_sitting = st.checkbox("作業員為坐姿 (REBA 不計膝彎曲)")
+    sitting_supported = st.checkbox("坐姿且具良好椅背支撐 (RULA 軀幹=1分)")
     legs_supported = st.checkbox("雙腳支撐良好且平衡", value=True)
 
 st.sidebar.markdown("---")
@@ -198,12 +200,12 @@ show_angle_labels = st.sidebar.checkbox(
 )
 
 # RULA Force/Load Score (0~3) 標準轉換邏輯
-if load_kg < 2.0:
-    rula_force = 0
-elif load_kg <= 10.0:
-    rula_force = 2 if (act_static or act_repeat or load_shock) else 1
-else:
-    rula_force = 3
+rula_force = compute_rula_force_score(
+    load_kg=load_kg,
+    act_static=act_static,
+    act_repeat=act_repeat,
+    load_shock=load_shock,
+)
 
 # 整合 modifiers 字典
 manual_modifiers = {
@@ -220,6 +222,8 @@ manual_modifiers = {
     "shoulder_raised": shoulder_raised,
     "arm_abducted": arm_abducted,
     "arm_supported": arm_supported,
+    "across_midline": across_midline,
+    "out_to_side": out_to_side,
     "wrist_deviated": wrist_deviated,
     "wrist_twist": wrist_twist,
     "wrist_twisted": (wrist_twist == 2),  # 支援 REBA 布林格式連動
@@ -227,8 +231,120 @@ manual_modifiers = {
     "trunk_side_bending": trunk_side_bending,
     "neck_twisted": neck_twisted,
     "neck_side_bending": neck_side_bending,
+    "is_sitting": is_sitting,
+    "sitting_supported": sitting_supported,
     "legs_supported": legs_supported,
 }
+
+
+# ==============================================================================
+# 共用雙量表 UI 渲染輔助函式 (避免重複程式碼)
+# ==============================================================================
+AL_THEME_MAP = {
+    0: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
+    1: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
+    2: {"border": "#F59E0B", "bg": "#FFFBEB", "text": "#78350F", "score": "#B45309"},
+    3: {"border": "#F97316", "bg": "#FFF7ED", "text": "#7C2D12", "score": "#C2410C"},
+    4: {"border": "#EF4444", "bg": "#FEF2F2", "text": "#7F1D1D", "score": "#B91C1C"},
+}
+
+
+def build_scorecard_html(title: str, score_val: int, al: int, risk_level: str, action_desc: str = "", extra_meta: str = "") -> str:
+    """產生高對比 RULA / REBA 風險總分卡片 HTML。"""
+    theme = AL_THEME_MAP.get(min(4, max(0, int(al))), AL_THEME_MAP[1])
+    extra_html = f'<div style="font-size: 0.85rem; color: #4B5563; margin-top: 4px;">{extra_meta}</div>' if extra_meta else ""
+    desc_html = f'<div style="font-size: 0.88rem; color: #374151; margin-top: 6px; line-height: 1.4;">📋 {action_desc}</div>' if action_desc else ""
+    return f"""
+    <div style="background-color: {theme['bg']}; border-left: 6px solid {theme['border']}; padding: 14px 16px; border-radius: 10px; margin-bottom: 12px; box-shadow: 0 3px 5px -1px rgba(0,0,0,0.06);">
+        <div style="font-size: 1.0rem; font-weight: 700; color: {theme['text']};">{title}</div>
+        <div style="font-size: 2.2rem; font-weight: 900; color: {theme['score']}; line-height: 1.15; margin: 4px 0;">
+            {score_val} <span style="font-size: 1.0rem; font-weight: 600; color: {theme['text']};">分 ｜ AL {al}</span>
+        </div>
+        <div style="font-size: 0.95rem; font-weight: 700; color: {theme['text']};">{risk_level}</div>
+        {extra_html}
+        {desc_html}
+    </div>
+    """
+
+
+def render_method_breakdown_and_export(
+    method_name: str,
+    ass_obj: Dict[str, Any],
+    angles_obj: Dict[str, float],
+    annotated_bgr_obj: np.ndarray,
+    diag_obj: Optional[Dict[str, Any]],
+    modifiers_obj: Dict[str, Any],
+    item_name: str,
+    dl_key: str,
+    expanded_whatif: bool = False,
+) -> None:
+    """渲染單一量表 (RULA 或 REBA) 之查表拆解明細、What-If 改善模擬與 HTML 檢核單下載按鈕。"""
+    flat = flatten_assessment_result(ass_obj)
+    is_reba = (method_name.upper() == "REBA")
+
+    with st.expander(f"📊 查看 {method_name} 查表拆解明細 (表 A / 表 B / 表 C 得分矩陣)", expanded=False):
+        col_sub1, col_sub2 = st.columns(2)
+        with col_sub1:
+            if not is_reba:
+                st.markdown("**📌 表 A 群 (上臂、前臂、手腕)**")
+                st.write(f"- 上臂姿勢得分: **{flat.get('upper_arm_score', '-')} 分**")
+                st.write(f"- 前臂姿勢得分: **{flat.get('lower_arm_score', '-')} 分**")
+                st.write(f"- 手腕與扭轉得分: **{flat.get('wrist_score', '-')} 分**")
+                st.write(f"- 表 A 查表得分: **{flat.get('table_a_score', '-')} 分**")
+                st.write(f"- 修正後得分 C: **{flat.get('wrist_arm_score', '-')} 分**")
+            else:
+                st.markdown("**📌 表 A 群 (軀幹、頸部、腿部)**")
+                st.write(f"- 軀幹姿勢得分: **{flat.get('trunk_score', '-')} 分**")
+                st.write(f"- 頸部姿勢得分: **{flat.get('neck_score', '-')} 分**")
+                st.write(f"- 腿部得分 (含支撐+膝彎曲): **{flat.get('legs_score', '-')} 分**")
+                st.write(f"- 表 A 查表得分: **{flat.get('table_a_score', '-')} 分**")
+                st.write(f"- 修正後得分 A: **{flat.get('score_a', '-')} 分**")
+        with col_sub2:
+            if not is_reba:
+                st.markdown("**📌 表 B 群 (頸部、軀幹、腿部)**")
+                st.write(f"- 頸部姿勢得分: **{flat.get('neck_score', '-')} 分**")
+                st.write(f"- 軀幹姿勢得分: **{flat.get('trunk_score', '-')} 分**")
+                st.write(f"- 腿部支撐平衡得分 (不計膝角): **{flat.get('legs_score', '-')} 分**")
+                st.write(f"- 表 B 查表得分: **{flat.get('table_b_score', '-')} 分**")
+                st.write(f"- 修正後得分 D: **{flat.get('neck_trunk_score', '-')} 分**")
+            else:
+                st.markdown("**📌 表 B 群 (上臂、前臂、手腕)**")
+                st.write(f"- 上臂姿勢得分: **{flat.get('upper_arm_score', '-')} 分**")
+                st.write(f"- 前臂姿勢得分: **{flat.get('lower_arm_score', '-')} 分**")
+                st.write(f"- 手腕姿勢得分: **{flat.get('wrist_score', '-')} 分**")
+                st.write(f"- 表 B 查表得分: **{flat.get('table_b_score', '-')} 分**")
+                st.write(f"- 修正後得分 B: **{flat.get('score_b', '-')} 分**")
+
+    what_if_scenarios = simulate_what_if_improvements(angles_obj, modifiers_obj, method=method_name)
+    with st.expander(f"💡 {method_name} AI 自動根因診斷與改善模擬 (What-If Simulation)", expanded=expanded_whatif):
+        if what_if_scenarios:
+            st.markdown("**🎯 改善效益排序與敏感度分析（AI 自動試算中立位效益）：**")
+            for idx, sc in enumerate(what_if_scenarios, 1):
+                delta = sc["score_drop"]
+                badge = f"🔥 總分 -{delta} 分 (效益顯著)" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平 (0分)")
+                st.markdown(f"**{idx}. {sc['category']}** ｜ `{badge}`")
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **模擬操作**：{sc['action']}")
+                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **預期結果**：總分降至 **{sc['new_score']} 分** (行動水準 AL {sc['new_action_level']}) ｜ {sc.get('priority', '')}")
+        else:
+            st.info("當前姿勢各項關鍵角度均接近建議中立位，暫無顯著降分改善項目。")
+
+    html_report = generate_html_report(
+        assessment_result=ass_obj,
+        angles=angles_obj,
+        annotated_bgr=annotated_bgr_obj,
+        method=method_name,
+        manual_modifiers=modifiers_obj,
+        what_if_scenarios=what_if_scenarios,
+        diagnostics=diag_obj,
+        item_name=item_name,
+    )
+    st.download_button(
+        label=f"📄 下載 {method_name} 正式人因工程檢核單 (.html / PDF)",
+        data=html_report.encode("utf-8"),
+        file_name=f"ErgoReport_{method_name}_{item_name}.html",
+        mime="text/html",
+        key=dl_key,
+    )
 
 
 # ==============================================================================
@@ -288,113 +404,73 @@ with tab_photo:
                     st.warning(f"⚠️ **身體負荷不對稱警示**：{diag.get('asymmetry_reason')}。建議檢查作業員是否有單側代償或單手提重不良姿勢！")
 
             with col_score:
-                st.markdown("#### 評估結果看板")
-                ass = res["assessment_result"]
-                al = ass["action_level"]
-                score_val = ass.get("final_reba_score") if method == "REBA" else ass.get("grand_score")
-                flat = res["flattened"]
+                st.markdown("#### 雙量表同步評估結果看板 (RULA & REBA)")
+                rula_ass = res["rula_result"]
+                reba_ass = res["reba_result"]
+                rula_score_v = rula_ass.get("grand_score", 1)
+                reba_score_v = reba_ass.get("final_reba_score", 1)
 
-                # 配色常數 (純文字與邊框色，深淺色主題皆清晰)
-                al_theme = {
-                    1: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
-                    2: {"border": "#F59E0B", "bg": "#FFFBEB", "text": "#78350F", "score": "#B45309"},
-                    3: {"border": "#F97316", "bg": "#FFF7ED", "text": "#7C2D12", "score": "#C2410C"},
-                    4: {"border": "#EF4444", "bg": "#FEF2F2", "text": "#7F1D1D", "score": "#B91C1C"},
-                }.get(min(4, max(1, al)))
-
-                st.markdown(f"""
-                <div style="background-color: {al_theme['bg']}; border-left: 6px solid {al_theme['border']}; padding: 18px 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.07);">
-                    <div style="font-size: 1.15rem; font-weight: 700; color: {al_theme['text']};">{method} 人體工學綜合總分</div>
-                    <div style="font-size: 2.7rem; font-weight: 900; color: {al_theme['score']}; line-height: 1.15; margin: 4px 0;">
-                        {score_val} <span style="font-size: 1.2rem; font-weight: 600; color: {al_theme['text']};">分 ｜ 行動水準 AL {al}</span>
-                    </div>
-                    <div style="font-size: 1.1rem; font-weight: 700; color: {al_theme['text']}; margin-top: 6px;">
-                        風險狀態：{ass['risk_level']}
-                    </div>
-                    <div style="font-size: 0.95rem; color: #374151; margin-top: 6px; line-height: 1.45;">
-                        📋 改善建議：{ass['action_description']}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                col_card_rula, col_card_reba = st.columns(2)
+                with col_card_rula:
+                    st.markdown(
+                        build_scorecard_html(
+                            "RULA 綜合總分 (上肢/坐姿)",
+                            rula_score_v,
+                            rula_ass["action_level"],
+                            rula_ass["risk_level"],
+                            rula_ass["action_description"],
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                with col_card_reba:
+                    st.markdown(
+                        build_scorecard_html(
+                            "REBA 綜合總分 (全身/搬運)",
+                            reba_score_v,
+                            reba_ass["action_level"],
+                            reba_ass["risk_level"],
+                            reba_ass["action_description"],
+                        ),
+                        unsafe_allow_html=True,
+                    )
 
                 st.markdown("##### 關節角度摘要")
                 angles = res["angles"]
                 col_a1, col_a2, col_a3 = st.columns(3)
                 col_a1.metric("軀幹角度", f"{angles['trunk']:+.1f}°")
                 col_a2.metric("頸部角度", f"{angles['neck']:+.1f}°")
-                col_a3.metric("膝關節角度", f"{angles['knee']:.1f}°")
+                col_a3.metric("膝關節角度 (僅 REBA)", f"{angles['knee']:.1f}°")
 
                 col_b1, col_b2, col_b3 = st.columns(3)
                 col_b1.metric("上臂屈伸", f"{angles['upper_arm']:+.1f}°")
                 col_b2.metric("前臂屈曲", f"{angles['lower_arm']:.1f}°")
                 col_b3.metric("手腕角度", f"{angles['wrist']:.1f}°")
 
-                # 詳細子分數表格
-                with st.expander("📊 查看查表拆解明細 (表 A / 表 B / 表 C 得分矩陣)", expanded=False):
-                    col_sub1, col_sub2 = st.columns(2)
-                    with col_sub1:
-                        if method == "RULA":
-                            st.markdown("**📌 表 A 群 (上臂、前臂、手腕)**")
-                            st.write(f"- 上臂姿勢得分: **{flat.get('upper_arm_score', '-')} 分**")
-                            st.write(f"- 前臂姿勢得分: **{flat.get('lower_arm_score', '-')} 分**")
-                            st.write(f"- 手腕與扭轉得分: **{flat.get('wrist_score', '-')} 分**")
-                            st.write(f"- 表 A 查表得分: **{flat.get('table_a_score', '-')} 分**")
-                            st.write(f"- 修正後得分 C: **{flat.get('wrist_arm_score', '-')} 分**")
-                        else:
-                            st.markdown("**📌 表 A 群 (軀幹、頸部、腿部)**")
-                            st.write(f"- 軀幹姿勢得分: **{flat.get('trunk_score', '-')} 分**")
-                            st.write(f"- 頸部姿勢得分: **{flat.get('neck_score', '-')} 分**")
-                            st.write(f"- 腿部姿勢得分: **{flat.get('legs_score', '-')} 分**")
-                            st.write(f"- 表 A 查表得分: **{flat.get('table_a_score', '-')} 分**")
-                            st.write(f"- 修正後得分 A: **{flat.get('score_a', '-')} 分**")
-                    with col_sub2:
-                        if method == "RULA":
-                            st.markdown("**📌 表 B 群 (頸部、軀幹、腿部)**")
-                            st.write(f"- 頸部姿勢得分: **{flat.get('neck_score', '-')} 分**")
-                            st.write(f"- 軀幹姿勢得分: **{flat.get('trunk_score', '-')} 分**")
-                            st.write(f"- 腿部姿勢得分: **{flat.get('legs_score', '-')} 分**")
-                            st.write(f"- 表 B 查表得分: **{flat.get('table_b_score', '-')} 分**")
-                            st.write(f"- 修正後得分 D: **{flat.get('neck_trunk_score', '-')} 分**")
-                        else:
-                            st.markdown("**📌 表 B 群 (上臂、前臂、手腕)**")
-                            st.write(f"- 上臂姿勢得分: **{flat.get('upper_arm_score', '-')} 分**")
-                            st.write(f"- 前臂姿勢得分: **{flat.get('lower_arm_score', '-')} 分**")
-                            st.write(f"- 手腕姿勢得分: **{flat.get('wrist_score', '-')} 分**")
-                            st.write(f"- 表 B 查表得分: **{flat.get('table_b_score', '-')} 分**")
-                            st.write(f"- 修正後得分 B: **{flat.get('score_b', '-')} 分**")
-
-                # AI What-If 改善模擬器 (敏感度分析與改善效益排序)
-                what_if_scenarios = simulate_what_if_improvements(angles, manual_modifiers, method=method)
-                with st.expander("💡 AI 自動根因診斷與改善模擬 (What-If Simulation)", expanded=True):
-                    if what_if_scenarios:
-                        st.markdown("**🎯 改善效益排序與敏感度分析（AI 自動試算中立位效益）：**")
-                        for idx, sc in enumerate(what_if_scenarios, 1):
-                            delta = sc["score_drop"]
-                            badge = f"🔥 總分 -{delta} 分 (效益顯著)" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平 (0分)")
-                            st.markdown(f"**{idx}. {sc['category']}** ｜ `{badge}`")
-                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **模擬操作**：{sc['action']}")
-                            st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;➜ **預期結果**：總分降至 **{sc['new_score']} 分** (行動水準 AL {sc['new_action_level']}) ｜ {sc.get('priority', '')}")
-                    else:
-                        st.info("當前姿勢各項關鍵角度均接近建議中立位，暫無顯著降分改善項目。")
-
-                # 下載正式人因工程單頁評估單 (HTML / PDF)
-                html_report = generate_html_report(
-                    assessment_result=ass,
-                    angles=angles,
-                    annotated_bgr=res["annotated_image"],
-                    method=method,
-                    manual_modifiers=manual_modifiers,
-                    what_if_scenarios=what_if_scenarios,
-                    diagnostics=diag,
-                    item_name=uploaded_image.name
-                )
-                st.download_button(
-                    label="📄 下載正式人因工程評估檢核單 (.html / 可一鍵列印 PDF)",
-                    data=html_report.encode("utf-8"),
-                    file_name=f"ErgoReport_{method}_{uploaded_image.name}.html",
-                    mime="text/html",
-                    key="dl_photo_report"
-                )
+                sub_tab_rula, sub_tab_reba = st.tabs(["📋 RULA 詳細拆解與改善建議", "📋 REBA 詳細拆解與改善建議"])
+                with sub_tab_rula:
+                    render_method_breakdown_and_export(
+                        method_name="RULA",
+                        ass_obj=rula_ass,
+                        angles_obj=angles,
+                        annotated_bgr_obj=res["annotated_rula"],
+                        diag_obj=diag,
+                        modifiers_obj=manual_modifiers,
+                        item_name=uploaded_image.name,
+                        dl_key="dl_photo_report_rula",
+                        expanded_whatif=True,
+                    )
+                with sub_tab_reba:
+                    render_method_breakdown_and_export(
+                        method_name="REBA",
+                        ass_obj=reba_ass,
+                        angles_obj=angles,
+                        annotated_bgr_obj=res["annotated_reba"],
+                        diag_obj=diag,
+                        modifiers_obj=manual_modifiers,
+                        item_name=uploaded_image.name,
+                        dl_key="dl_photo_report_reba",
+                        expanded_whatif=True,
+                    )
         else:
             st.warning("未能在此影像中偵測到清晰的人體關鍵點，請嘗試其他角度或光線充足之照片。")
     else:
@@ -441,6 +517,12 @@ with tab_video:
                     st.session_state["cached_video_records"] = res_video["time_series_records"]
                     st.session_state["cached_video_peak_img"] = res_video["peak_risk_image"]
                     st.session_state["cached_video_peak_rec"] = res_video["peak_risk_record"]
+                    st.session_state["cached_video_peak_rula_img"] = res_video["peak_rula_image"]
+                    st.session_state["cached_video_peak_rula_rec"] = res_video["peak_rula_record"]
+                    st.session_state["cached_video_peak_reba_img"] = res_video["peak_reba_image"]
+                    st.session_state["cached_video_peak_reba_rec"] = res_video["peak_reba_record"]
+                    st.session_state["cached_video_rula_high_pct"] = res_video["rula_high_risk_exposure_pct"]
+                    st.session_state["cached_video_reba_high_pct"] = res_video["reba_high_risk_exposure_pct"]
                     st.session_state["cached_video_path"] = uploaded_video.name
                     prog_bar.progress(100, text="分析完成！")
                 except Exception as e:
@@ -452,134 +534,121 @@ with tab_video:
                 res_recalc = PoseAnalyzer.recalculate_video_scores(records, method=method, manual_modifiers=manual_modifiers)
                 st.session_state["cached_video_records"] = res_recalc["time_series_records"]
                 st.session_state["cached_video_peak_rec"] = res_recalc["peak_risk_record"]
+                st.session_state["cached_video_peak_rula_rec"] = res_recalc["peak_rula_record"]
+                st.session_state["cached_video_peak_reba_rec"] = res_recalc["peak_reba_record"]
+                st.session_state["cached_video_rula_high_pct"] = res_recalc["rula_high_risk_exposure_pct"]
+                st.session_state["cached_video_reba_high_pct"] = res_recalc["reba_high_risk_exposure_pct"]
 
             # 顯示結果
             records = st.session_state.get("cached_video_records", [])
-            peak_img = st.session_state.get("cached_video_peak_img")
-            peak_rec = st.session_state.get("cached_video_peak_rec", {})
+            peak_rula_img = st.session_state.get("cached_video_peak_rula_img")
+            peak_rula_rec = st.session_state.get("cached_video_peak_rula_rec") or {}
+            peak_reba_img = st.session_state.get("cached_video_peak_reba_img")
+            peak_reba_rec = st.session_state.get("cached_video_peak_reba_rec") or {}
 
             if records:
-                st.success(f"影片分析完成！共提取 {len(records)} 幀有效姿態資料。")
+                st.success(f"影片雙量表分析完成！共提取 {len(records)} 幀有效姿態資料。")
 
-                # 指標看板
+                rula_scores_v = [r["rula_score"] for r in records]
+                reba_scores_v = [r["reba_score"] for r in records]
+                rula_high_pct_v = st.session_state.get("cached_video_rula_high_pct", 0.0)
+                reba_high_pct_v = st.session_state.get("cached_video_reba_high_pct", 0.0)
+
                 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-                peak_score = peak_rec.get("score", 0)
-                col_m1.metric("全片最高危害分數 (Peak Score)", f"{peak_score} 分")
-                col_m2.metric("最高風險瞬間時間戳", f"{peak_rec.get('timestamp_sec', 0.0)} 秒")
-                scores = [r["score"] for r in records]
-                col_m3.metric("作業全程平均分數", f"{np.mean(scores):.2f} 分")
-                high_risk_cnt = sum(1 for r in records if r["action_level"] >= 3)
-                high_pct = round((high_risk_cnt / len(records)) * 100.0, 1)
-                col_m4.metric("高危害時長佔比 (AL 3~4)", f"{high_pct}%")
+                col_m1.metric("RULA 最高危害分", f"{peak_rula_rec.get('rula_score', 0)} 分")
+                col_m2.metric("RULA 峰值時間點", f"{peak_rula_rec.get('timestamp_sec', 0.0)} 秒")
+                col_m3.metric("RULA 全程平均分", f"{np.mean(rula_scores_v):.2f} 分")
+                col_m4.metric("RULA 高危害佔比 (AL 3~4)", f"{rula_high_pct_v}%")
+
+                col_n1, col_n2, col_n3, col_n4 = st.columns(4)
+                col_n1.metric("REBA 最高危害分", f"{peak_reba_rec.get('reba_score', 0)} 分")
+                col_n2.metric("REBA 峰值時間點", f"{peak_reba_rec.get('timestamp_sec', 0.0)} 秒")
+                col_n3.metric("REBA 全程平均分", f"{np.mean(reba_scores_v):.2f} 分")
+                col_n4.metric("REBA 高危害佔比 (AL 3~4)", f"{reba_high_pct_v}%")
 
                 st.markdown("---")
-                col_chart, col_peak = st.columns([1.3, 1.0])
+                col_chart, col_peak = st.columns([1.2, 1.0])
 
                 with col_chart:
-                    st.markdown("#### 人體工學風險時序變化曲線")
+                    st.markdown("#### 雙量表風險時序變化曲線 (RULA vs. REBA)")
                     timestamps = [r["timestamp_sec"] for r in records]
                     chart_data = {
                         "時間 (秒)": timestamps,
-                        f"{method} 風險分數": scores
+                        "RULA 風險分數": rula_scores_v,
+                        "REBA 風險分數": reba_scores_v,
                     }
-                    st.line_chart(chart_data, x="時間 (秒)", y=f"{method} 風險分數")
+                    st.line_chart(chart_data, x="時間 (秒)", y=["RULA 風險分數", "REBA 風險分數"])
 
-                with col_peak:
-                    st.markdown("#### 🚨 全片最高危害瞬間截圖")
-                    if peak_img is not None:
-                        peak_rgb = cv2.cvtColor(peak_img, cv2.COLOR_BGR2RGB)
-                        st.image(
-                            peak_rgb,
-                            width="stretch"
-                        )
-
-                        peak_al = peak_rec.get("action_level", 1)
-                        peak_risk = peak_rec.get("risk_level", "一般風險")
-                        peak_time = peak_rec.get("timestamp_sec", 0.0)
-
-                        al_theme_peak = {
-                            1: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
-                            2: {"border": "#F59E0B", "bg": "#FFFBEB", "text": "#78350F", "score": "#B45309"},
-                            3: {"border": "#F97316", "bg": "#FFF7ED", "text": "#7C2D12", "score": "#C2410C"},
-                            4: {"border": "#EF4444", "bg": "#FEF2F2", "text": "#7F1D1D", "score": "#B91C1C"},
-                        }.get(min(4, max(1, peak_al)))
-
-                        st.markdown(f"""
-                        <div style="background-color: {al_theme_peak['bg']}; border-left: 6px solid {al_theme_peak['border']}; padding: 14px 16px; border-radius: 8px; margin-top: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.06);">
-                            <div style="font-size: 0.95rem; font-weight: 700; color: {al_theme_peak['text']};">⚠️ 危害峰值資訊 (時間點: {peak_time} 秒)</div>
-                            <div style="font-size: 1.8rem; font-weight: 900; color: {al_theme_peak['score']}; line-height: 1.2; margin: 4px 0;">
-                                {method} 評分：{peak_score} 分 <span style="font-size: 1.05rem; font-weight: 600; color: {al_theme_peak['text']};">/ 行動水準 AL {peak_al}</span>
-                            </div>
-                            <div style="font-size: 0.95rem; font-weight: 700; color: {al_theme_peak['text']};">風險程度：{peak_risk}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                        col_pk1, col_pk2 = st.columns(2)
-                        with col_pk1:
-                            st.write(f"📐 軀幹角度: **{peak_rec.get('trunk_angle', 0.0):+.1f}°**")
-                            st.write(f"📐 頸部角度: **{peak_rec.get('neck_angle', 0.0):+.1f}°**")
-                        with col_pk2:
-                            st.write(f"📐 上臂角度: **{peak_rec.get('upper_arm_angle', 0.0):+.1f}°**")
-                            st.write(f"📐 前臂手肘: **{peak_rec.get('lower_arm_angle', 0.0):.1f}°**")
-
-                        # 峰值瞬間 AI 改善模擬
-                        peak_angles = peak_rec.get("raw_angles", {
-                            "trunk": peak_rec.get("trunk_angle", 0.0),
-                            "neck": peak_rec.get("neck_angle", 0.0),
-                            "upper_arm": peak_rec.get("upper_arm_angle", 0.0),
-                            "lower_arm": peak_rec.get("lower_arm_angle", 90.0),
-                            "wrist": peak_rec.get("wrist_angle", 0.0),
-                            "knee": peak_rec.get("knee_angle", 0.0)
-                        })
-                        peak_what_if = simulate_what_if_improvements(peak_angles, manual_modifiers, method=method)
-                        with st.expander("💡 峰值瞬間 AI 改善模擬 (What-If Simulation)", expanded=False):
-                            if peak_what_if:
-                                for idx, sc in enumerate(peak_what_if, 1):
-                                    delta = sc["score_drop"]
-                                    badge = f"🔥 總分 -{delta} 分" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平")
-                                    st.markdown(f"**{idx}. {sc['category']}** ({badge}): {sc['action']} ➜ 總分降至 **{sc['new_score']} 分** (AL {sc['new_action_level']})")
-                            else:
-                                st.info("當前姿勢各項關鍵角度均接近建議中立位，暫無顯著降分改善項目。")
-
-                        # 計算完整峰值評估字典 (確保報告具備完整 Table A / B / C 拆解與 action_description)
-                        peak_ass = calculate_reba(peak_angles, manual_modifiers) if method == "REBA" else calculate_rula(peak_angles, manual_modifiers)
-
-                        # 下載最高危害瞬間正式人因報告
-                        peak_report_html = generate_html_report(
-                            assessment_result=peak_ass,
-                            angles=peak_angles,
-                            annotated_bgr=peak_img,
-                            method=method,
-                            manual_modifiers=manual_modifiers,
-                            what_if_scenarios=peak_what_if,
-                            diagnostics={"facing": "N/A", "side_used": peak_rec.get("side_used", "auto"), "left_confidence": 1.0, "right_confidence": 1.0},
-                            item_name=f"Peak_{uploaded_video.name}"
-                        )
-                        st.download_button(
-                            label="📄 下載最高危害瞬間人因評估單 (.html / PDF)",
-                            data=peak_report_html.encode("utf-8"),
-                            file_name=f"PeakReport_{method}_{uploaded_video.name}.html",
-                            mime="text/html",
-                            key="dl_peak_report"
-                        )
-
-                # 下載完整 CSV
-                import io
-                import csv
-                csv_buffer = io.StringIO()
-                if records:
+                    # 下載完整雙量表 CSV
+                    csv_buffer = io.StringIO()
                     fieldnames = [k for k in records[0].keys() if k != "raw_angles"]
                     writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames, extrasaction="ignore")
                     writer.writeheader()
                     for r in records:
                         writer.writerow({k: v for k, v in r.items() if k != "raw_angles"})
 
-                st.download_button(
-                    label="📥 下載逐幀評估報表 (.CSV)",
-                    data=csv_buffer.getvalue().encode("utf-8-sig"),
-                    file_name=f"{uploaded_video.name}_ergo_analysis.csv",
-                    mime="text/csv"
-                )
+                    st.download_button(
+                        label="📥 下載雙量表逐幀評估報表 (.CSV)",
+                        data=csv_buffer.getvalue().encode("utf-8-sig"),
+                        file_name=f"{uploaded_video.name}_dual_ergo_analysis.csv",
+                        mime="text/csv",
+                        key="dl_video_csv",
+                    )
+
+                with col_peak:
+                    st.markdown("#### 🚨 各自最高危害瞬間截圖 (Independent Peak Frames)")
+                    vtab_rula, vtab_reba = st.tabs(["🚨 RULA 最高危害瞬間", "🚨 REBA 最高危害瞬間"])
+
+                    for sub_tab, m_name, p_img, p_rec in (
+                        (vtab_rula, "RULA", peak_rula_img, peak_rula_rec),
+                        (vtab_reba, "REBA", peak_reba_img, peak_reba_rec),
+                    ):
+                        with sub_tab:
+                            if p_img is not None and p_rec:
+                                st.image(cv2.cvtColor(p_img, cv2.COLOR_BGR2RGB), width="stretch")
+                                p_score = p_rec.get(f"{m_name.lower()}_score", p_rec.get("score", 0))
+                                p_al = p_rec.get(f"{m_name.lower()}_action_level", p_rec.get("action_level", 1))
+                                p_risk = p_rec.get(f"{m_name.lower()}_risk_level", p_rec.get("risk_level", ""))
+                                p_time = p_rec.get("timestamp_sec", 0.0)
+                                st.markdown(
+                                    build_scorecard_html(
+                                        f"{m_name} 危害峰值 (時間點: {p_time} 秒)",
+                                        p_score,
+                                        p_al,
+                                        p_risk,
+                                    ),
+                                    unsafe_allow_html=True,
+                                )
+
+                                p_angles = p_rec.get("raw_angles", {
+                                    "trunk": p_rec.get("trunk_angle", 0.0),
+                                    "neck": p_rec.get("neck_angle", 0.0),
+                                    "upper_arm": p_rec.get("upper_arm_angle", 0.0),
+                                    "lower_arm": p_rec.get("lower_arm_angle", 90.0),
+                                    "wrist": p_rec.get("wrist_angle", 0.0),
+                                    "knee": p_rec.get("knee_angle", 0.0),
+                                })
+                                col_pk1, col_pk2 = st.columns(2)
+                                with col_pk1:
+                                    st.write(f"📐 軀幹角度: **{p_angles.get('trunk', 0.0):+.1f}°**")
+                                    st.write(f"📐 頸部角度: **{p_angles.get('neck', 0.0):+.1f}°**")
+                                    st.write(f"📐 膝關節 (僅 REBA): **{p_angles.get('knee', 0.0):.1f}°**")
+                                with col_pk2:
+                                    st.write(f"📐 上臂角度: **{p_angles.get('upper_arm', 0.0):+.1f}°**")
+                                    st.write(f"📐 前臂手肘: **{p_angles.get('lower_arm', 0.0):.1f}°**")
+
+                                peak_ass = calculate_reba(p_angles, manual_modifiers) if m_name == "REBA" else calculate_rula(p_angles, manual_modifiers)
+                                render_method_breakdown_and_export(
+                                    method_name=m_name,
+                                    ass_obj=peak_ass,
+                                    angles_obj=p_angles,
+                                    annotated_bgr_obj=p_img,
+                                    diag_obj={"facing": "N/A", "side_used": p_rec.get("side_used", "auto"), "left_confidence": 1.0, "right_confidence": 1.0},
+                                    modifiers_obj=manual_modifiers,
+                                    item_name=f"Peak_{m_name}_{uploaded_video.name}",
+                                    dl_key=f"dl_peak_report_{m_name.lower()}",
+                                    expanded_whatif=False,
+                                )
 
 
 # ==============================================================================
@@ -688,43 +757,59 @@ with tab_live:
                     ph_img.image(img_rgb, width="stretch")
 
                     if res_live.get("detected"):
-                        ass_l = res_live["assessment_result"]
-                        al_l = res_live["action_level"]
-                        score_l = res_live["score"]
+                        rula_ass_l = res_live["rula_result"]
+                        reba_ass_l = res_live["reba_result"]
+                        rula_s_l = res_live["rula_score"]
+                        rula_al_l = res_live["rula_action_level"]
+                        reba_s_l = res_live["reba_score"]
+                        reba_al_l = res_live["reba_action_level"]
                         ang_l = res_live["angles"]
                         diag_l = res_live["diagnostics"]
-                        theme_l = live_al_theme.get(min(4, max(0, al_l)), live_al_theme[1])
                         calib_tag = "已校正" if res_live.get("is_calibrated") else "未校正"
                         rec_tag = f" ｜ 🔴 錄製中 {res_live.get('recorded_duration_sec', 0.0):.1f}s" if res_live.get("is_recording") else ""
 
-                        ph_card.markdown(f"""
-                        <div style="background-color: {theme_l['bg']}; border-left: 6px solid {theme_l['border']}; padding: 14px 18px; border-radius: 10px; margin-bottom: 10px;">
-                            <div style="font-size: 0.95rem; font-weight: 700; color: {theme_l['text']};">{method} 即時評估 ｜ FPS: {res_live['fps']:.1f} ｜ 基準: {calib_tag}{rec_tag}</div>
-                            <div style="font-size: 2.3rem; font-weight: 900; color: {theme_l['score']}; line-height: 1.15; margin: 4px 0;">
-                                {score_l} <span style="font-size: 1.1rem; font-weight: 600; color: {theme_l['text']};">分 ｜ 行動水準 AL {al_l}</span>
-                            </div>
-                            <div style="font-size: 1.0rem; font-weight: 700; color: {theme_l['text']};">風險狀態：{ass_l['risk_level']}</div>
-                            <div style="font-size: 0.88rem; color: #374151; margin-top: 4px;">評估側：{diag_l['side_used'].upper()} (左 {diag_l['left_score']} 分 vs 右 {diag_l['right_score']} 分)</div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                        card_rula_html = build_scorecard_html(
+                            f"RULA 即時評估 ｜ FPS: {res_live['fps']:.1f}",
+                            rula_s_l,
+                            rula_al_l,
+                            rula_ass_l["risk_level"],
+                            extra_meta=f"評估側: {diag_l['side_used'].upper()} (L:{diag_l.get('left_rula_score', '-')} R:{diag_l.get('right_rula_score', '-')}) ｜ 基準: {calib_tag}",
+                        )
+                        card_reba_html = build_scorecard_html(
+                            f"REBA 即時評估{rec_tag}",
+                            reba_s_l,
+                            reba_al_l,
+                            reba_ass_l["risk_level"],
+                            extra_meta=f"評估側: {diag_l['side_used'].upper()} (L:{diag_l.get('left_reba_score', '-')} R:{diag_l.get('right_reba_score', '-')})",
+                        )
+                        ph_card.markdown(
+                            f'<div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">{card_rula_html}{card_reba_html}</div>',
+                            unsafe_allow_html=True,
+                        )
 
                         ph_angles.markdown(
                             f"**軀幹**: `{ang_l['trunk']:+.1f}°` ｜ **頸部**: `{ang_l['neck']:+.1f}°` ｜ **上臂**: `{ang_l['upper_arm']:+.1f}°`  \n"
-                            f"**前臂**: `{ang_l['lower_arm']:.1f}°` ｜ **手腕**: `{ang_l['wrist']:.1f}°` ｜ **膝關節**: `{ang_l['knee']:.1f}°`"
+                            f"**前臂**: `{ang_l['lower_arm']:.1f}°` ｜ **手腕**: `{ang_l['wrist']:.1f}°` ｜ **膝關節 (僅 REBA)**: `{ang_l['knee']:.1f}°`"
                         )
 
                         warnings_txt = []
                         if diag_l.get("asymmetry_alert"):
                             warnings_txt.append(f"⚠️ **身體負荷不對稱警示**：{diag_l.get('asymmetry_reason')}")
                         if res_live.get("high_risk_streak_sec", 0.0) >= 2.0:
-                            warnings_txt.append(f"🚨 **高危害姿勢持續過久**：已連續維持 AL 3~4 達 **{res_live['high_risk_streak_sec']:.1f} 秒**，請立即調整姿勢！")
+                            warnings_txt.append(
+                                f"🚨 **高危害姿勢持續過久**：RULA AL≥3 連續 {res_live.get('rula_high_risk_streak_sec', 0.0):.1f}s / "
+                                f"REBA AL≥3 連續 {res_live.get('reba_high_risk_streak_sec', 0.0):.1f}s，請立即調整姿勢！"
+                            )
                         if warnings_txt:
                             ph_warn.warning("  \n".join(warnings_txt))
                         else:
                             ph_warn.empty()
 
-                        if loop_idx % 5 == 0 and len(live_session.score_history) >= 2:
-                            ph_chart.line_chart({f"{method} 即時分數": list(live_session.score_history)})
+                        if loop_idx % 5 == 0 and len(live_session.rula_score_history) >= 2:
+                            ph_chart.line_chart({
+                                "RULA 即時分數": list(live_session.rula_score_history),
+                                "REBA 即時分數": list(live_session.reba_score_history),
+                            })
 
                         if loop_idx % 10 == 0 and live_session.is_recording and live_session.records:
                             st.session_state["live_last_summary"] = live_session.get_recording_summary()
@@ -749,21 +834,25 @@ with tab_live:
         summary = st.session_state.get("live_last_summary")
         if summary and summary.get("records"):
             st.markdown("---")
-            st.subheader("📊 最近一次即時動態評估摘要與峰值報告")
+            st.subheader("📊 最近一次即時動態雙量表評估摘要與峰值報告")
             col_lm1, col_lm2, col_lm3, col_lm4 = st.columns(4)
-            col_lm1.metric("最高危害分數 (Peak)", f"{summary['peak_score']} 分")
-            col_lm2.metric("錄測總時長", f"{summary['duration_sec']:.1f} 秒")
-            col_lm3.metric("平均危害分數", f"{summary['avg_score']:.2f} 分")
-            col_lm4.metric("高危害佔比 (AL 3~4)", f"{summary['high_risk_pct']:.1f}%")
+            col_lm1.metric("RULA 最高危害分", f"{summary.get('peak_rula_score', summary['peak_score'])} 分")
+            col_lm2.metric("RULA 平均 / 高危害佔比", f"{summary.get('avg_rula_score', summary['avg_score']):.1f} / {summary.get('rula_high_risk_pct', summary['high_risk_pct']):.1f}%")
+            col_lm3.metric("REBA 最高危害分", f"{summary.get('peak_reba_score', 0)} 分")
+            col_lm4.metric("REBA 平均 / 高危害佔比", f"{summary.get('avg_reba_score', 0.0):.1f} / {summary.get('reba_high_risk_pct', 0.0):.1f}%")
 
-            col_lc_left, col_lc_right = st.columns([1.25, 1.0])
+            col_lc_left, col_lc_right = st.columns([1.2, 1.0])
             with col_lc_left:
-                st.markdown("#### 時序風險變化曲線")
+                st.markdown(f"#### 雙量表時序風險曲線 (總錄測時長：{summary['duration_sec']:.1f} 秒)")
                 live_recs = summary["records"]
                 st.line_chart(
-                    {"時間 (秒)": [r["timestamp_sec"] for r in live_recs], f"{method} 風險分數": [r["score"] for r in live_recs]},
+                    {
+                        "時間 (秒)": [r["timestamp_sec"] for r in live_recs],
+                        "RULA 風險分數": [r["rula_score"] for r in live_recs],
+                        "REBA 風險分數": [r["reba_score"] for r in live_recs],
+                    },
                     x="時間 (秒)",
-                    y=f"{method} 風險分數",
+                    y=["RULA 風險分數", "REBA 風險分數"],
                 )
                 csv_buf_live = io.StringIO()
                 fnames_live = [k for k in live_recs[0].keys() if k != "raw_angles"]
@@ -772,51 +861,49 @@ with tab_live:
                 for r in live_recs:
                     writer_live.writerow({k: v for k, v in r.items() if k != "raw_angles"})
                 st.download_button(
-                    label="📥 下載即時動態逐幀報表 (.CSV)",
+                    label="📥 下載即時動態雙量表逐幀報表 (.CSV)",
                     data=csv_buf_live.getvalue().encode("utf-8-sig"),
-                    file_name=f"live_ergo_{method}.csv",
+                    file_name="live_ergo_dual_RULA_REBA.csv",
                     mime="text/csv",
                     key="dl_live_csv",
                 )
 
             with col_lc_right:
-                st.markdown("#### 🚨 最高危害瞬間截圖 (Peak Frame)")
-                peak_img_l = summary.get("peak_image")
-                peak_ass_l = summary.get("peak_assessment")
-                peak_ang_l = summary.get("peak_angles")
-                if peak_img_l is not None and peak_ass_l is not None and peak_ang_l is not None:
-                    st.image(cv2.cvtColor(peak_img_l, cv2.COLOR_BGR2RGB), width="stretch")
-                    peak_al_l = peak_ass_l.get("action_level", 1)
-                    st.markdown(
-                        f"**最高分數**：{summary['peak_score']} 分 (AL {peak_al_l}) ｜ **風險程度**：{peak_ass_l.get('risk_level', '')}"
-                    )
-                    live_what_if = simulate_what_if_improvements(peak_ang_l, manual_modifiers, method=method)
-                    with st.expander("💡 峰值瞬間 AI 改善模擬 (What-If Simulation)", expanded=False):
-                        if live_what_if:
-                            for idx, sc in enumerate(live_what_if, 1):
-                                delta = sc["score_drop"]
-                                badge = f"🔥 總分 -{delta} 分" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平")
-                                st.markdown(f"**{idx}. {sc['category']}** ({badge}): {sc['action']} ➜ 總分降至 **{sc['new_score']} 分** (AL {sc['new_action_level']}) ｜ {sc.get('priority', '')}")
-                        else:
-                            st.info("當前姿勢各項關鍵角度均接近建議中立位，暫無顯著降分改善項目。")
-
-                    live_html_report = generate_html_report(
-                        assessment_result=peak_ass_l,
-                        angles=peak_ang_l,
-                        annotated_bgr=peak_img_l,
-                        method=method,
-                        manual_modifiers=manual_modifiers,
-                        what_if_scenarios=live_what_if,
-                        diagnostics=summary.get("peak_diagnostics"),
-                        item_name=f"LiveSession_{method}",
-                    )
-                    st.download_button(
-                        label="📄 下載即時錄測峰值評估檢核單 (.html / PDF)",
-                        data=live_html_report.encode("utf-8"),
-                        file_name=f"LivePeakReport_{method}.html",
-                        mime="text/html",
-                        key="dl_live_html",
-                    )
+                st.markdown("#### 🚨 各自最高危害瞬間截圖 (Independent Peak Frames)")
+                ltab_rula, ltab_reba = st.tabs(["🚨 RULA 最高危害瞬間", "🚨 REBA 最高危害瞬間"])
+                for l_sub, m_name, key_pfx in (
+                    (ltab_rula, "RULA", "rula"),
+                    (ltab_reba, "REBA", "reba"),
+                ):
+                    with l_sub:
+                        p_img_l = summary.get(f"peak_{key_pfx}_image")
+                        p_ass_l = summary.get(f"peak_{key_pfx}_assessment")
+                        p_ang_l = summary.get(f"peak_{key_pfx}_angles")
+                        p_rec_l = summary.get(f"peak_{key_pfx}_record") or {}
+                        p_diag_l = summary.get(f"peak_{key_pfx}_diagnostics")
+                        p_score_l = summary.get(f"peak_{key_pfx}_score", 0)
+                        if p_img_l is not None and p_ass_l is not None and p_ang_l is not None:
+                            st.image(cv2.cvtColor(p_img_l, cv2.COLOR_BGR2RGB), width="stretch")
+                            st.markdown(
+                                build_scorecard_html(
+                                    f"{m_name} 峰值 (時間點: {p_rec_l.get('timestamp_sec', 0.0)} 秒)",
+                                    p_score_l,
+                                    p_ass_l.get("action_level", 1),
+                                    p_ass_l.get("risk_level", ""),
+                                ),
+                                unsafe_allow_html=True,
+                            )
+                            render_method_breakdown_and_export(
+                                method_name=m_name,
+                                ass_obj=p_ass_l,
+                                angles_obj=p_ang_l,
+                                annotated_bgr_obj=p_img_l,
+                                diag_obj=p_diag_l,
+                                modifiers_obj=manual_modifiers,
+                                item_name=f"LiveSession_{m_name}",
+                                dl_key=f"dl_live_html_{key_pfx}",
+                                expanded_whatif=False,
+                            )
         else:
             st.info("請在上方開啟「🟢 開啟即時攝影機動態偵測」開始動態評估與自動評分；關閉開關後將自動彙整本次峰值得分與改善報告。")
 

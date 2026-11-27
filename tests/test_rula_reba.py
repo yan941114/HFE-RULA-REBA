@@ -13,8 +13,11 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.rula_reba_engine import (
+    RULA_TABLE_C,
     calculate_rula,
     calculate_reba,
+    calculate_both,
+    compute_rula_force_score,
     score_upper_arm,
     score_lower_arm,
     score_wrist,
@@ -174,6 +177,44 @@ def test_reba_benchmarks():
     print("  -> REBA 基準測試全部通過！")
 
 
+def test_standard_audit_rules():
+    print("[TEST] 驗證 RULA / REBA 官方規範審計細節...")
+
+    # 1. RULA_TABLE_C 最大值不得超過 7
+    assert int(RULA_TABLE_C.max()) == 7, f"RULA_TABLE_C max should be 7, got {RULA_TABLE_C.max()}"
+
+    # 2. REBA 頸部/軀幹 同時扭轉+側彎僅加 +1 分 (RULA 則累加 +2 分)
+    n_reba, _ = score_neck(5.0, twisted=True, side_bending=True, is_reba=True)
+    assert n_reba == 2, f"REBA Neck base(1) + twist/sidebend(1) should be 2, got {n_reba}"
+    n_rula, _ = score_neck(5.0, twisted=True, side_bending=True, is_reba=False)
+    assert n_rula == 3, f"RULA Neck base(1) + twist(1) + sidebend(1) should be 3, got {n_rula}"
+
+    t_reba, _ = score_trunk(0.0, twisted=True, side_bending=True, is_reba=True)
+    assert t_reba == 2, f"REBA Trunk base(1) + twist/sidebend(1) should be 2, got {t_reba}"
+    t_rula, _ = score_trunk(0.0, twisted=True, side_bending=True, is_reba=False)
+    assert t_rula == 3, f"RULA Trunk base(1) + twist(1) + sidebend(1) should be 3, got {t_rula}"
+
+    # 3. RULA 腿部完全不計膝關節角度，REBA 則依膝彎曲給 +1/+2
+    leg_rula, _ = score_legs(supported=True, knee_angle_deg=90.0, is_sitting=False, is_reba=False)
+    assert leg_rula == 1, f"RULA Legs should ignore knee angle, got {leg_rula}"
+    leg_reba, _ = score_legs(supported=True, knee_angle_deg=90.0, is_sitting=False, is_reba=True)
+    assert leg_reba == 3, f"REBA Legs base(1) + knee>60(2) should be 3, got {leg_reba}"
+
+    # 4. RULA Force/Load: 瞬間衝擊 (Shock) 不論負重皆為 3 分
+    assert compute_rula_force_score(load_kg=0.5, load_shock=True) == 3
+    assert compute_rula_force_score(load_kg=12.0, act_static=False, act_repeat=False) == 3
+    assert compute_rula_force_score(load_kg=5.0, act_static=False, act_repeat=False) == 1
+    assert compute_rula_force_score(load_kg=5.0, act_repeat=True) == 2
+
+    # 5. calculate_both 同步回傳雙量表
+    both = calculate_both({"trunk": 35.0, "neck": 20.0, "knee": 70.0, "upper_arm": 50.0, "lower_arm": 110.0, "wrist": 0.0})
+    assert "rula" in both and "reba" in both
+    assert both["rula"]["group_b"]["legs"]["final_score"] == 1
+    assert both["reba"]["group_a"]["legs"]["final_score"] == 3
+
+    print("  -> RULA / REBA 官方規範審計測試全部通過！")
+
+
 if __name__ == "__main__":
     print("=" * 50)
     print("開始執行 RULA / REBA 核心引擎單元測試...")
@@ -181,6 +222,7 @@ if __name__ == "__main__":
     test_angle_discretization()
     test_rula_benchmarks()
     test_reba_benchmarks()
+    test_standard_audit_rules()
     print("=" * 50)
     print("ALL TESTS PASSED! 所有單元測試順利通過！")
     print("=" * 50)

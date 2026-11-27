@@ -322,18 +322,20 @@ class PoseAnalyzer:
         left_angles = self._calculate_side_angles(xy, conf, True, v_trunk, fwd_sign, trunk_angle, neck_angle)
         right_angles = self._calculate_side_angles(xy, conf, False, v_trunk, fwd_sign, trunk_angle, neck_angle)
 
-        # 雙側即時試算分數 (用於 Worst-Case 判斷與不對稱分析)
+        # 雙側即時試算 RULA 與 REBA 分數 (用於 Worst-Case 判斷與不對稱分析)
+        left_rula = calculate_rula(left_angles, manual_modifiers)
+        right_rula = calculate_rula(right_angles, manual_modifiers)
+        left_reba = calculate_reba(left_angles, manual_modifiers)
+        right_reba = calculate_reba(right_angles, manual_modifiers)
+
+        left_rula_score = left_rula.get("grand_score", 1)
+        right_rula_score = right_rula.get("grand_score", 1)
+        left_reba_score = left_reba.get("final_reba_score", 1)
+        right_reba_score = right_reba.get("final_reba_score", 1)
+
         is_reba = (method.upper() == "REBA")
-        if is_reba:
-            left_eval = calculate_reba(left_angles, manual_modifiers)
-            right_eval = calculate_reba(right_angles, manual_modifiers)
-            left_score = left_eval.get("final_reba_score", 1)
-            right_score = right_eval.get("final_reba_score", 1)
-        else:
-            left_eval = calculate_rula(left_angles, manual_modifiers)
-            right_eval = calculate_rula(right_angles, manual_modifiers)
-            left_score = left_eval.get("grand_score", 1)
-            right_score = right_eval.get("grand_score", 1)
+        left_score = left_reba_score if is_reba else left_rula_score
+        right_score = right_reba_score if is_reba else right_rula_score
 
         # 側別選擇邏輯 (支援 Auto, Worst, Left, Right)
         side_choice = (side or "auto").lower()
@@ -391,6 +393,10 @@ class PoseAnalyzer:
             "right_angles": right_angles,
             "left_score": left_score,
             "right_score": right_score,
+            "left_rula_score": left_rula_score,
+            "right_rula_score": right_rula_score,
+            "left_reba_score": left_reba_score,
+            "right_reba_score": right_reba_score,
             "score_diff": score_diff,
             "shoulder_tilt": round(shoulder_tilt, 1),
             "asymmetry_alert": asymmetry_alert,
@@ -427,25 +433,32 @@ class PoseAnalyzer:
             xy, conf, side=side, smooth=False, manual_modifiers=manual_modifiers, method=method
         )
 
-        # 執行查表評估
-        if method.upper() == "REBA":
-            assessment_result = calculate_reba(angles, manual_modifiers)
-            score = assessment_result["final_reba_score"]
-            level = assessment_result["action_level"]
-        else:
-            assessment_result = calculate_rula(angles, manual_modifiers)
-            score = assessment_result["grand_score"]
-            level = assessment_result["action_level"]
+        # 同步執行 RULA 與 REBA 雙量表查表評估
+        rula_result = calculate_rula(angles, manual_modifiers)
+        reba_result = calculate_reba(angles, manual_modifiers)
 
-        # 標註骨架疊圖 (預設不畫黃色 HUD 框，完整呈現全身雙側節點)
-        annotated_img = self.render_overlay(
-            image_bgr, xy, conf, side_used, assessment_result, angles,
+        annotated_rula = self.render_overlay(
+            image_bgr, xy, conf, side_used, rula_result, angles,
             draw_hud=draw_hud, show_angle_labels=show_angle_labels
         )
+        annotated_reba = self.render_overlay(
+            image_bgr, xy, conf, side_used, reba_result, angles,
+            draw_hud=draw_hud, show_angle_labels=show_angle_labels
+        )
+
+        is_reba = (method.upper() == "REBA")
+        assessment_result = reba_result if is_reba else rula_result
+        annotated_img = annotated_reba if is_reba else annotated_rula
 
         return {
             "assessment_result": assessment_result,
             "flattened": flatten_assessment_result(assessment_result),
+            "rula_result": rula_result,
+            "rula_flattened": flatten_assessment_result(rula_result),
+            "annotated_rula": annotated_rula,
+            "reba_result": reba_result,
+            "reba_flattened": flatten_assessment_result(reba_result),
+            "annotated_reba": annotated_reba,
             "angles": angles,
             "diagnostics": diag,
             "annotated_image": annotated_img,
@@ -648,9 +661,22 @@ class PoseAnalyzer:
         self.reset_smoother()
 
         frame_records: List[Dict[str, Any]] = []
+        is_reba_primary = (method.upper() == "REBA")
         peak_score = -1
         peak_frame_record = None
         peak_frame_image = None
+
+        peak_rula_score = -1
+        peak_rula_record = None
+        peak_rula_assessment = None
+        peak_rula_angles = None
+        peak_rula_image = None
+
+        peak_reba_score = -1
+        peak_reba_record = None
+        peak_reba_assessment = None
+        peak_reba_angles = None
+        peak_reba_image = None
 
         frame_idx = 0
         while True:
@@ -666,14 +692,16 @@ class PoseAnalyzer:
                         xy, conf, side=side, smooth=True, manual_modifiers=manual_modifiers, method=method
                     )
 
-                    if method.upper() == "REBA":
-                        res = calculate_reba(angles, manual_modifiers)
-                        score = res["final_reba_score"]
-                        level = res["action_level"]
-                    else:
-                        res = calculate_rula(angles, manual_modifiers)
-                        score = res["grand_score"]
-                        level = res["action_level"]
+                    rula_res = calculate_rula(angles, manual_modifiers)
+                    reba_res = calculate_reba(angles, manual_modifiers)
+                    rula_score = rula_res["grand_score"]
+                    rula_level = rula_res["action_level"]
+                    reba_score = reba_res["final_reba_score"]
+                    reba_level = reba_res["action_level"]
+
+                    res = reba_res if is_reba_primary else rula_res
+                    score = reba_score if is_reba_primary else rula_score
+                    level = reba_level if is_reba_primary else rula_level
 
                     annotated = self.render_overlay(
                         frame, xy, conf, side_used, res, angles,
@@ -687,17 +715,47 @@ class PoseAnalyzer:
                         "timestamp_sec": round(frame_idx / fps, 2),
                         "score": score,
                         "action_level": level,
+                        "rula_score": rula_score,
+                        "rula_action_level": rula_level,
+                        "rula_risk_level": rula_res["risk_level"],
+                        "rula_action_description": rula_res["action_description"],
+                        "reba_score": reba_score,
+                        "reba_action_level": reba_level,
+                        "reba_risk_level": reba_res["risk_level"],
+                        "reba_action_description": reba_res["action_description"],
                         "side_used": side_used,
                         "raw_angles": angles.copy(),
                         **flatten_assessment_result(res)
                     }
                     frame_records.append(rec)
 
-                    # 追蹤最高風險影格 (Peak Risk Frame)
+                    # 追蹤主量表最高風險影格 (向後相容)
                     if score > peak_score:
                         peak_score = score
                         peak_frame_record = rec
                         peak_frame_image = annotated.copy()
+
+                    # 獨立追蹤 RULA 最高危害瞬間
+                    if rula_score > peak_rula_score:
+                        peak_rula_score = rula_score
+                        peak_rula_record = rec
+                        peak_rula_assessment = rula_res
+                        peak_rula_angles = angles.copy()
+                        peak_rula_image = self.render_overlay(
+                            frame, xy, conf, side_used, rula_res, angles,
+                            draw_hud=draw_hud, show_angle_labels=show_angle_labels
+                        )
+
+                    # 獨立追蹤 REBA 最高危害瞬間
+                    if reba_score > peak_reba_score:
+                        peak_reba_score = reba_score
+                        peak_reba_record = rec
+                        peak_reba_assessment = reba_res
+                        peak_reba_angles = angles.copy()
+                        peak_reba_image = self.render_overlay(
+                            frame, xy, conf, side_used, reba_res, angles,
+                            draw_hud=draw_hud, show_angle_labels=show_angle_labels
+                        )
 
             frame_idx += 1
 
@@ -708,9 +766,15 @@ class PoseAnalyzer:
         # 計算風險等級佔比統計 (Risk Distribution)
         total_eval_frames = len(frame_records)
         level_counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
+        rula_high_cnt = 0
+        reba_high_cnt = 0
         for r in frame_records:
             lvl = r["action_level"]
             level_counts[lvl] = level_counts.get(lvl, 0) + 1
+            if r["rula_action_level"] >= 3:
+                rula_high_cnt += 1
+            if r["reba_action_level"] >= 3:
+                reba_high_cnt += 1
 
         level_percentages = {
             f"AL_{lvl}": round((cnt / total_eval_frames) * 100.0, 1) if total_eval_frames > 0 else 0.0
@@ -719,6 +783,8 @@ class PoseAnalyzer:
 
         # 高風險以上 (AL 3 + AL 4) 佔比
         high_risk_pct = round(((level_counts.get(3, 0) + level_counts.get(4, 0)) / max(1, total_eval_frames)) * 100.0, 1)
+        rula_high_pct = round((rula_high_cnt / max(1, total_eval_frames)) * 100.0, 1)
+        reba_high_pct = round((reba_high_cnt / max(1, total_eval_frames)) * 100.0, 1)
 
         return {
             "total_frames_processed": total_eval_frames,
@@ -729,6 +795,18 @@ class PoseAnalyzer:
             "peak_risk_image": peak_frame_image,
             "risk_distribution_pct": level_percentages,
             "high_risk_exposure_pct": high_risk_pct,
+            "peak_rula_score": peak_rula_score,
+            "peak_rula_record": peak_rula_record,
+            "peak_rula_assessment": peak_rula_assessment,
+            "peak_rula_angles": peak_rula_angles,
+            "peak_rula_image": peak_rula_image,
+            "rula_high_risk_exposure_pct": rula_high_pct,
+            "peak_reba_score": peak_reba_score,
+            "peak_reba_record": peak_reba_record,
+            "peak_reba_assessment": peak_reba_assessment,
+            "peak_reba_angles": peak_reba_angles,
+            "peak_reba_image": peak_reba_image,
+            "reba_high_risk_exposure_pct": reba_high_pct,
             "time_series_records": frame_records
         }
 
@@ -738,14 +816,20 @@ class PoseAnalyzer:
                                  manual_modifiers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         為前端 Web GUI 提供「極速短路純重算」接口：
-        當使用者在介面上修改負重、支撐、活動性質時，
-        直接透過此函式在幾毫秒內重新計算所有影格分數，絕不重跑 YOLO 推論！
+        同步重算所有影格的 RULA 與 REBA 分數與各自獨立峰值，絕不重跑 YOLO 推論！
         """
         updated_records = []
+        is_reba_primary = (method.upper() == "REBA")
         peak_score = -1
         peak_frame_record = None
+        peak_rula_score = -1
+        peak_rula_record = None
+        peak_reba_score = -1
+        peak_reba_record = None
 
         level_counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0}
+        rula_high_cnt = 0
+        reba_high_cnt = 0
 
         for r in time_series_records:
             angles = r.get("raw_angles", {
@@ -757,14 +841,16 @@ class PoseAnalyzer:
                 "knee": r.get("knee_angle", 0.0)
             })
 
-            if method.upper() == "REBA":
-                res = calculate_reba(angles, manual_modifiers)
-                score = res["final_reba_score"]
-                level = res["action_level"]
-            else:
-                res = calculate_rula(angles, manual_modifiers)
-                score = res["grand_score"]
-                level = res["action_level"]
+            rula_res = calculate_rula(angles, manual_modifiers)
+            reba_res = calculate_reba(angles, manual_modifiers)
+            rula_score = rula_res["grand_score"]
+            rula_level = rula_res["action_level"]
+            reba_score = reba_res["final_reba_score"]
+            reba_level = reba_res["action_level"]
+
+            res = reba_res if is_reba_primary else rula_res
+            score = reba_score if is_reba_primary else rula_score
+            level = reba_level if is_reba_primary else rula_level
 
             flat = flatten_assessment_result(res)
             new_r = {
@@ -772,6 +858,14 @@ class PoseAnalyzer:
                 "timestamp_sec": r["timestamp_sec"],
                 "score": score,
                 "action_level": level,
+                "rula_score": rula_score,
+                "rula_action_level": rula_level,
+                "rula_risk_level": rula_res["risk_level"],
+                "rula_action_description": rula_res["action_description"],
+                "reba_score": reba_score,
+                "reba_action_level": reba_level,
+                "reba_risk_level": reba_res["risk_level"],
+                "reba_action_description": reba_res["action_description"],
                 "side_used": r.get("side_used", "auto"),
                 "raw_angles": angles,
                 **flat
@@ -779,9 +873,20 @@ class PoseAnalyzer:
             updated_records.append(new_r)
 
             level_counts[level] = level_counts.get(level, 0) + 1
+            if rula_level >= 3:
+                rula_high_cnt += 1
+            if reba_level >= 3:
+                reba_high_cnt += 1
+
             if score > peak_score:
                 peak_score = score
                 peak_frame_record = new_r
+            if rula_score > peak_rula_score:
+                peak_rula_score = rula_score
+                peak_rula_record = new_r
+            if reba_score > peak_reba_score:
+                peak_reba_score = reba_score
+                peak_reba_record = new_r
 
         total_frames = len(updated_records)
         level_percentages = {
@@ -795,6 +900,12 @@ class PoseAnalyzer:
             "peak_risk_record": peak_frame_record,
             "risk_distribution_pct": level_percentages,
             "high_risk_exposure_pct": high_risk_pct,
+            "peak_rula_score": peak_rula_score,
+            "peak_rula_record": peak_rula_record,
+            "rula_high_risk_exposure_pct": round((rula_high_cnt / max(1, total_frames)) * 100.0, 1),
+            "peak_reba_score": peak_reba_score,
+            "peak_reba_record": peak_reba_record,
+            "reba_high_risk_exposure_pct": round((reba_high_cnt / max(1, total_frames)) * 100.0, 1),
             "time_series_records": updated_records
         }
 

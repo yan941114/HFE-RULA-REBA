@@ -93,8 +93,8 @@ RULA_TABLE_C = np.array([
     [3, 3, 3, 4, 5, 6, 6],  # Score C = 4
     [4, 4, 4, 5, 6, 7, 7],  # Score C = 5
     [4, 4, 5, 6, 6, 7, 7],  # Score C = 6
-    [5, 5, 6, 6, 7, 7, 8],  # Score C = 7
-    [5, 5, 6, 7, 7, 8, 8],  # Score C = 8+
+    [5, 5, 6, 6, 7, 7, 7],  # Score C = 7
+    [5, 5, 6, 7, 7, 7, 7],  # Score C = 8+
 ], dtype=int)
 
 
@@ -317,11 +317,12 @@ def score_neck(angle_deg: float,
         else:
             base = 3
 
-    adj = 0
-    if twisted:
-        adj += 1
-    if side_bending:
-        adj += 1
+    if is_reba:
+        # REBA 標準：扭轉「或」側彎僅加 1 分（最高 3 分）
+        adj = 1 if (twisted or side_bending) else 0
+    else:
+        # RULA 標準：扭轉與側彎可累加（各 +1 分）
+        adj = (1 if twisted else 0) + (1 if side_bending else 0)
 
     max_score = 3 if is_reba else 6
     final = max(1, min(max_score, base + adj))
@@ -371,10 +372,16 @@ def score_trunk(angle_deg: float,
             base = 4
 
     adj = 0
-    if twisted:
-        adj += 1
-    if side_bending:
-        adj += 1
+    if is_reba:
+        # REBA 標準：軀幹扭轉「或」側彎加 1 分（最高 5 分）
+        if twisted or side_bending:
+            adj = 1
+    else:
+        # RULA 標準：軀幹扭轉與側彎可累加（各 +1 分）
+        if twisted:
+            adj += 1
+        if side_bending:
+            adj += 1
 
     max_score = 5 if is_reba else 6
     final = max(1, min(max_score, base + adj))
@@ -732,6 +739,43 @@ def calculate_reba(auto_angles: Dict[str, float],
     }
 
 
+def compute_rula_force_score(
+    load_kg: float,
+    act_static: bool = False,
+    act_repeat: bool = False,
+    load_shock: bool = False,
+) -> int:
+    """
+    依據 McAtamney & Corlett (1993) RULA 官方表單計算 Force / Load 分數 (0~3)：
+    - 若具瞬間衝擊或急劇施力 (Shock / rapid buildup)：無條件給 3 分
+    - 負重 < 2 kg 且非衝擊：0 分
+    - 負重 2 ~ 10 kg：間歇 1 分；靜態維持或高頻重複 (>4次/分) 為 2 分
+    - 負重 > 10 kg：無條件 3 分
+    """
+    if load_shock:
+        return 3
+    if load_kg < 2.0:
+        return 0
+    if load_kg <= 10.0:
+        return 2 if (act_static or act_repeat) else 1
+    return 3
+
+
+def calculate_both(
+    auto_angles: Dict[str, float],
+    manual_modifiers: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """同步計算同一姿勢之 RULA 與 REBA 完整評估結果與扁平化明細。"""
+    rula_res = calculate_rula(auto_angles, manual_modifiers)
+    reba_res = calculate_reba(auto_angles, manual_modifiers)
+    return {
+        "rula": rula_res,
+        "reba": reba_res,
+        "rula_flattened": flatten_assessment_result(rula_res),
+        "reba_flattened": flatten_assessment_result(reba_res),
+    }
+
+
 # ==============================================================================
 # 扁平化工具函式 (Flattening Helper for Pandas/CSV Export)
 # ==============================================================================
@@ -905,7 +949,27 @@ def simulate_what_if_improvements(auto_angles: Dict[str, float],
                 "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
             })
 
-    # 5. 改善握把品質 (REBA Coupling)
+    # 5. 改善膝關節彎曲 (僅 REBA 計入下肢彎曲負荷，RULA 不計膝角)
+    cur_knee = auto_angles.get("knee", 0.0)
+    if is_reba and not base_m.get("is_sitting", False) and cur_knee >= 30.0:
+        sim_ang = dict(auto_angles)
+        sim_ang["knee"] = 0.0
+        res = calculate_reba(sim_ang, base_m)
+        score = res["final_reba_score"]
+        al = res["action_level"]
+        diff = base_score - score
+        if diff > 0:
+            scenarios.append({
+                "category": "下肢與膝關節改善",
+                "action": f"調整站姿或增設防疲勞墊/支撐座，將膝關節彎曲由 {cur_knee:.1f}° 減緩至 <30°",
+                "new_score": score,
+                "score_drop": diff,
+                "new_action_level": al,
+                "level_drop": base_al - al,
+                "priority": "⭐ 優先推薦" if diff >= 2 else "一般建議"
+            })
+
+    # 6. 改善握把品質 (REBA Coupling)
     if is_reba and base_m.get("coupling_score", 0) > 0:
         sim_m = dict(base_m)
         sim_m["coupling_score"] = 0

@@ -58,11 +58,16 @@ class TestLiveErgoMonitor(unittest.TestCase):
                 )
                 self.assertTrue(res["detected"])
                 self.assertGreaterEqual(res["score"], 1)
+                self.assertGreaterEqual(res["rula_score"], 1)
+                self.assertGreaterEqual(res["reba_score"], 1)
                 self.assertIn("annotated_image", res)
+                self.assertIn("rula_result", res)
+                self.assertIn("reba_result", res)
                 self.assertIn("group_a", res["assessment_result"])
                 self.assertIn("group_b", res["assessment_result"])
 
-            self.assertEqual(len(session.score_history), 5 if method == "RULA" else 10)
+            self.assertEqual(len(session.rula_score_history), 5 if method == "RULA" else 10)
+            self.assertEqual(len(session.reba_score_history), 5 if method == "RULA" else 10)
             self.assertIsNotNone(res)
 
     def test_baseline_calibration_and_clear(self):
@@ -111,27 +116,35 @@ class TestLiveErgoMonitor(unittest.TestCase):
         self.assertEqual(summary["total_frames"], 6)
         self.assertGreater(summary["duration_sec"], 2.0)
         self.assertGreaterEqual(summary["peak_score"], 3)
-        self.assertIsNotNone(summary["peak_assessment"])
-        self.assertIn("group_a", summary["peak_assessment"])
-        self.assertIn("group_b", summary["peak_assessment"])
-        self.assertIsNotNone(summary["peak_image"])
+        self.assertGreaterEqual(summary["peak_rula_score"], 3)
+        self.assertGreaterEqual(summary["peak_reba_score"], 1)
+        self.assertIsNotNone(summary["peak_rula_assessment"])
+        self.assertIsNotNone(summary["peak_reba_assessment"])
+        self.assertIn("group_a", summary["peak_rula_assessment"])
+        self.assertIn("group_a", summary["peak_reba_assessment"])
+        self.assertIsNotNone(summary["peak_rula_image"])
+        self.assertIsNotNone(summary["peak_reba_image"])
 
         snap_paths = session.export_snapshot(
             last_res, self.temp_out_dir, method="RULA", manual_modifiers=modifiers
         )
         self.assertTrue(os.path.exists(snap_paths["jpg_path"]))
-        self.assertTrue(os.path.exists(snap_paths["html_path"]))
+        self.assertTrue(os.path.exists(snap_paths["rula_html_path"]))
+        self.assertTrue(os.path.exists(snap_paths["reba_html_path"]))
 
         sess_paths = session.export_session_outputs(
             summary, self.temp_out_dir, method="RULA", manual_modifiers=modifiers
         )
         self.assertTrue(os.path.exists(sess_paths["csv_path"]))
-        self.assertTrue(os.path.exists(sess_paths["peak_jpg_path"]))
-        self.assertTrue(os.path.exists(sess_paths["peak_html_path"]))
+        self.assertTrue(os.path.exists(sess_paths["peak_rula_jpg_path"]))
+        self.assertTrue(os.path.exists(sess_paths["peak_rula_html_path"]))
+        self.assertTrue(os.path.exists(sess_paths["peak_reba_jpg_path"]))
+        self.assertTrue(os.path.exists(sess_paths["peak_reba_html_path"]))
 
-        with open(sess_paths["peak_html_path"], "r", encoding="utf-8") as f:
-            html_content = f.read()
-        self.assertIn("<!DOCTYPE html>", html_content)
+        with open(sess_paths["peak_rula_html_path"], "r", encoding="utf-8") as f:
+            self.assertIn("<!DOCTYPE html>", f.read())
+        with open(sess_paths["peak_reba_html_path"], "r", encoding="utf-8") as f:
+            self.assertIn("<!DOCTYPE html>", f.read())
 
 
 if __name__ == "__main__":
