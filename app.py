@@ -277,7 +277,7 @@ with tab_photo:
             with col_img:
                 st.markdown("#### 骨架與關節疊圖標註")
                 img_rgb = cv2.cvtColor(res["annotated_image"], cv2.COLOR_BGR2RGB)
-                st.image(img_rgb, use_container_width=True)
+                st.image(img_rgb, width="stretch")
                 diag = res["diagnostics"]
                 facing_zh = "朝左 (Left)" if diag['facing'] == 'left' else ("朝右 (Right)" if diag['facing'] == 'right' else "正面/未定")
                 side_zh = "左側 (Left)" if diag['side_used'] == 'left' else "右側 (Right)"
@@ -490,7 +490,7 @@ with tab_video:
                         peak_rgb = cv2.cvtColor(peak_img, cv2.COLOR_BGR2RGB)
                         st.image(
                             peak_rgb,
-                            use_container_width=True
+                            width="stretch"
                         )
 
                         peak_al = peak_rec.get("action_level", 1)
@@ -685,7 +685,7 @@ with tab_live:
                         st.session_state["live_calib_pending"] = False
 
                     img_rgb = cv2.cvtColor(res_live["annotated_image"], cv2.COLOR_BGR2RGB)
-                    ph_img.image(img_rgb, use_container_width=True)
+                    ph_img.image(img_rgb, width="stretch")
 
                     if res_live.get("detected"):
                         ass_l = res_live["assessment_result"]
@@ -785,7 +785,7 @@ with tab_live:
                 peak_ass_l = summary.get("peak_assessment")
                 peak_ang_l = summary.get("peak_angles")
                 if peak_img_l is not None and peak_ass_l is not None and peak_ang_l is not None:
-                    st.image(cv2.cvtColor(peak_img_l, cv2.COLOR_BGR2RGB), use_container_width=True)
+                    st.image(cv2.cvtColor(peak_img_l, cv2.COLOR_BGR2RGB), width="stretch")
                     peak_al_l = peak_ass_l.get("action_level", 1)
                     st.markdown(
                         f"**最高分數**：{summary['peak_score']} 分 (AL {peak_al_l}) ｜ **風險程度**：{peak_ass_l.get('risk_level', '')}"
