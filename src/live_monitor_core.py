@@ -300,7 +300,7 @@ class LiveErgoSession:
         }
 
     def _finalize_video_file(self) -> Optional[str]:
-        """將已緩衝之標註影格寫入實際播放速率之 MP4 暫存檔並釋放記憶體。"""
+        """將已緩衝之原始影格寫入實際播放速率之 MP4 暫存檔（不含骨架與標註）並釋放記憶體。"""
         if not self.save_video or not self._video_frames_jpg:
             self._video_frames_jpg.clear()
             return None
@@ -488,7 +488,7 @@ class LiveErgoSession:
             self.records.append(rec)
 
             if self.save_video and len(self._video_frames_jpg) < self.max_video_frames:
-                ok_jpg, buf_jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                ok_jpg, buf_jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
                 if ok_jpg:
                     self._video_frames_jpg.append(buf_jpg)
 
@@ -679,7 +679,7 @@ class LiveErgoSession:
 
         src_video = summary.get("video_path")
         if src_video and os.path.exists(src_video):
-            dst_video = os.path.join(output_dir, f"{base_name}_annotated.mp4")
+            dst_video = os.path.join(output_dir, f"{base_name}_raw.mp4")
             shutil.copy2(src_video, dst_video)
             outputs["video_path"] = dst_video
 

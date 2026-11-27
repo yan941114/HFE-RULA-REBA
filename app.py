@@ -694,7 +694,7 @@ with tab_live:
         live_deadband = st.slider("死區抑制門檻 (°)", min_value=0.0, max_value=5.0, value=1.5, step=0.5, key="live_dead_slider")
     with col_lc3:
         run_live = st.toggle("🟢 開啟即時攝影機動態偵測", value=False, key="live_run_toggle")
-        record_live = st.checkbox("🔴 同步錄製數據、.mp4 標註影片與峰值截圖", value=True, key="live_rec_chk")
+        record_live = st.checkbox("🔴 同步錄製數據、.mp4 原始影片與峰值截圖", value=True, key="live_rec_chk")
     with col_lc4:
         if st.button("🎯 設為中立姿勢基準 (校正鏡頭傾角)", key="live_calib_btn"):
             if live_session.calibrate_baseline():
@@ -934,9 +934,9 @@ with tab_live:
                     with open(live_video_path, "rb") as vf:
                         video_bytes = vf.read()
                     st.download_button(
-                        label="🎬 下載即時錄製標註影片 (.MP4)",
+                        label="🎬 下載即時錄製原始影片 (.MP4)",
                         data=video_bytes,
-                        file_name="live_ergo_annotated.mp4",
+                        file_name="live_ergo_raw.mp4",
                         mime="video/mp4",
                         key="dl_live_mp4",
                     )
