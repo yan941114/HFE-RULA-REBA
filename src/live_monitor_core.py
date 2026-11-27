@@ -56,6 +56,40 @@ except ImportError:
 ANGLE_KEYS = ("trunk", "neck", "upper_arm", "lower_arm", "wrist", "knee")
 
 
+def build_method_csv_rows(
+    records: List[Dict[str, Any]],
+    method: str,
+    manual_modifiers: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    依指定量表 (RULA 或 REBA) 從時序紀錄產生純淨的單一量表 CSV 資料列，
+    確保 RULA 與 REBA 報表欄位各自獨立、互不混雜。
+    """
+    is_reba = (method.upper() == "REBA")
+    rows: List[Dict[str, Any]] = []
+    for r in records:
+        angles = r.get("raw_angles", {
+            "trunk": r.get("trunk_angle", 0.0),
+            "neck": r.get("neck_angle", 0.0),
+            "upper_arm": r.get("upper_arm_angle", 0.0),
+            "lower_arm": r.get("lower_arm_angle", 90.0),
+            "wrist": r.get("wrist_angle", 0.0),
+            "knee": r.get("knee_angle", 0.0),
+        })
+        res = calculate_reba(angles, manual_modifiers) if is_reba else calculate_rula(angles, manual_modifiers)
+        flat = flatten_assessment_result(res)
+        row = {
+            "frame_index": r.get("frame_index", 0),
+            "timestamp_sec": r.get("timestamp_sec", 0.0),
+            "side_used": r.get("side_used", "auto"),
+        }
+        if "asymmetry_alert" in r:
+            row["asymmetry_alert"] = r["asymmetry_alert"]
+        row.update(flat)
+        rows.append(row)
+    return rows
+
+
 class LiveErgoSession:
     """管理即時攝影機動態姿勢分析、雙量表同步評分、濾波防抖、基準校正與錄製摘要狀態。"""
 
@@ -536,15 +570,21 @@ class LiveErgoSession:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_name = f"{prefix}_{stamp}"
 
-        csv_path = os.path.join(output_dir, f"{base_name}.csv")
-        fieldnames = [k for k in records[0].keys() if k != "raw_angles"]
-        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            for r in records:
-                writer.writerow({k: v for k, v in r.items() if k != "raw_angles"})
+        outputs: Dict[str, str] = {}
+        for m_name, key_prefix in (("RULA", "rula"), ("REBA", "reba")):
+            m_csv_path = os.path.join(output_dir, f"{base_name}_{m_name}.csv")
+            m_rows = build_method_csv_rows(records, method=m_name, manual_modifiers=manual_modifiers)
+            if m_rows:
+                m_fields = list(m_rows[0].keys())
+                with open(m_csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=m_fields, extrasaction="ignore")
+                    writer.writeheader()
+                    writer.writerows(m_rows)
+                outputs[f"{key_prefix}_csv_path"] = m_csv_path
 
-        outputs: Dict[str, str] = {"csv_path": csv_path}
+        primary_key = "reba" if method.upper() == "REBA" else "rula"
+        if f"{primary_key}_csv_path" in outputs:
+            outputs["csv_path"] = outputs[f"{primary_key}_csv_path"]
 
         for m_name, key_prefix in (("RULA", "rula"), ("REBA", "reba")):
             p_img = summary.get(f"peak_{key_prefix}_image")

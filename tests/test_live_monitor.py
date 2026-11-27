@@ -135,11 +135,23 @@ class TestLiveErgoMonitor(unittest.TestCase):
         sess_paths = session.export_session_outputs(
             summary, self.temp_out_dir, method="RULA", manual_modifiers=modifiers
         )
-        self.assertTrue(os.path.exists(sess_paths["csv_path"]))
+        self.assertTrue(os.path.exists(sess_paths["rula_csv_path"]))
+        self.assertTrue(os.path.exists(sess_paths["reba_csv_path"]))
+        self.assertNotEqual(sess_paths["rula_csv_path"], sess_paths["reba_csv_path"])
         self.assertTrue(os.path.exists(sess_paths["peak_rula_jpg_path"]))
         self.assertTrue(os.path.exists(sess_paths["peak_rula_html_path"]))
         self.assertTrue(os.path.exists(sess_paths["peak_reba_jpg_path"]))
         self.assertTrue(os.path.exists(sess_paths["peak_reba_html_path"]))
+
+        with open(sess_paths["rula_csv_path"], "r", encoding="utf-8-sig") as f:
+            rula_csv_txt = f.read()
+        self.assertIn("wrist_arm_score", rula_csv_txt)
+        self.assertNotIn("coupling_score", rula_csv_txt)
+
+        with open(sess_paths["reba_csv_path"], "r", encoding="utf-8-sig") as f:
+            reba_csv_txt = f.read()
+        self.assertIn("coupling_score", reba_csv_txt)
+        self.assertNotIn("wrist_arm_score", reba_csv_txt)
 
         with open(sess_paths["peak_rula_html_path"], "r", encoding="utf-8") as f:
             self.assertIn("<!DOCTYPE html>", f.read())

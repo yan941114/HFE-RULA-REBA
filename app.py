@@ -29,7 +29,7 @@ import streamlit as st
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from src.pose_analyzer import PoseAnalyzer
-from src.live_monitor_core import LiveErgoSession
+from src.live_monitor_core import LiveErgoSession, build_method_csv_rows
 from src.rula_reba_engine import (
     calculate_rula,
     calculate_reba,
@@ -249,22 +249,37 @@ AL_THEME_MAP = {
 }
 
 
+@st.cache_resource
+def get_live_camera_holder() -> Dict[str, Any]:
+    """跨 Streamlit rerun 共享攝影機控制代碼與協作權杖，防止切換量表時鏡頭搶鎖失敗。"""
+    return {"cap": None, "cam_idx": None, "active_token": None, "loop_running": False}
+
+
+def rows_to_csv_bytes(rows: List[Dict[str, Any]]) -> bytes:
+    """將單一量表資料列轉為帶 UTF-8 BOM 的 CSV 位元組。"""
+    buf = io.StringIO()
+    if rows:
+        fieldnames = list(rows[0].keys())
+        writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+    return buf.getvalue().encode("utf-8-sig")
+
+
 def build_scorecard_html(title: str, score_val: int, al: int, risk_level: str, action_desc: str = "", extra_meta: str = "") -> str:
-    """產生高對比 RULA / REBA 風險總分卡片 HTML。"""
+    """產生高對比 RULA / REBA 風險總分卡片 HTML（單行無縮排，避免被 Markdown 誤判為程式碼區塊）。"""
     theme = AL_THEME_MAP.get(min(4, max(0, int(al))), AL_THEME_MAP[1])
-    extra_html = f'<div style="font-size: 0.85rem; color: #4B5563; margin-top: 4px;">{extra_meta}</div>' if extra_meta else ""
-    desc_html = f'<div style="font-size: 0.88rem; color: #374151; margin-top: 6px; line-height: 1.4;">📋 {action_desc}</div>' if action_desc else ""
-    return f"""
-    <div style="background-color: {theme['bg']}; border-left: 6px solid {theme['border']}; padding: 14px 16px; border-radius: 10px; margin-bottom: 12px; box-shadow: 0 3px 5px -1px rgba(0,0,0,0.06);">
-        <div style="font-size: 1.0rem; font-weight: 700; color: {theme['text']};">{title}</div>
-        <div style="font-size: 2.2rem; font-weight: 900; color: {theme['score']}; line-height: 1.15; margin: 4px 0;">
-            {score_val} <span style="font-size: 1.0rem; font-weight: 600; color: {theme['text']};">分 ｜ AL {al}</span>
-        </div>
-        <div style="font-size: 0.95rem; font-weight: 700; color: {theme['text']};">{risk_level}</div>
-        {extra_html}
-        {desc_html}
-    </div>
-    """
+    extra_html = f'<div style="font-size:0.85rem; color:#4B5563; margin-top:4px;">{extra_meta}</div>' if extra_meta else ""
+    desc_html = f'<div style="font-size:0.88rem; color:#374151; margin-top:6px; line-height:1.4;">📋 {action_desc}</div>' if action_desc else ""
+    return (
+        f'<div style="background-color:{theme["bg"]}; border-left:6px solid {theme["border"]}; '
+        f'padding:14px 16px; border-radius:10px; margin-bottom:12px; box-shadow:0 3px 5px -1px rgba(0,0,0,0.06);">'
+        f'<div style="font-size:1.0rem; font-weight:700; color:{theme["text"]};">{title}</div>'
+        f'<div style="font-size:2.2rem; font-weight:900; color:{theme["score"]}; line-height:1.15; margin:4px 0;">'
+        f'{score_val} <span style="font-size:1.0rem; font-weight:600; color:{theme["text"]};">分 ｜ AL {al}</span></div>'
+        f'<div style="font-size:0.95rem; font-weight:700; color:{theme["text"]};">{risk_level}</div>'
+        f'{extra_html}{desc_html}</div>'
+    )
 
 
 def render_method_breakdown_and_export(
@@ -579,21 +594,26 @@ with tab_video:
                     }
                     st.line_chart(chart_data, x="時間 (秒)", y=["RULA 風險分數", "REBA 風險分數"])
 
-                    # 下載完整雙量表 CSV
-                    csv_buffer = io.StringIO()
-                    fieldnames = [k for k in records[0].keys() if k != "raw_angles"]
-                    writer = csv.DictWriter(csv_buffer, fieldnames=fieldnames, extrasaction="ignore")
-                    writer.writeheader()
-                    for r in records:
-                        writer.writerow({k: v for k, v in r.items() if k != "raw_angles"})
-
-                    st.download_button(
-                        label="📥 下載雙量表逐幀評估報表 (.CSV)",
-                        data=csv_buffer.getvalue().encode("utf-8-sig"),
-                        file_name=f"{uploaded_video.name}_dual_ergo_analysis.csv",
-                        mime="text/csv",
-                        key="dl_video_csv",
-                    )
+                    # 分開匯出 RULA 與 REBA 獨立 CSV 報表
+                    rula_csv_bytes = rows_to_csv_bytes(build_method_csv_rows(records, "RULA", manual_modifiers))
+                    reba_csv_bytes = rows_to_csv_bytes(build_method_csv_rows(records, "REBA", manual_modifiers))
+                    col_vcsv1, col_vcsv2 = st.columns(2)
+                    with col_vcsv1:
+                        st.download_button(
+                            label="📥 下載 RULA 逐幀報表 (.CSV)",
+                            data=rula_csv_bytes,
+                            file_name=f"{uploaded_video.name}_RULA.csv",
+                            mime="text/csv",
+                            key="dl_video_csv_rula",
+                        )
+                    with col_vcsv2:
+                        st.download_button(
+                            label="📥 下載 REBA 逐幀報表 (.CSV)",
+                            data=reba_csv_bytes,
+                            file_name=f"{uploaded_video.name}_REBA.csv",
+                            mime="text/csv",
+                            key="dl_video_csv_reba",
+                        )
 
                 with col_peak:
                     st.markdown("#### 🚨 各自最高危害瞬間截圖 (Independent Peak Frames)")
@@ -687,7 +707,17 @@ with tab_live:
             live_session.clear_baseline()
             st.info("已清除基準偏移量。")
 
+    cam_holder = get_live_camera_holder()
+
     if run_live:
+        my_token = time.time()
+        cam_holder["active_token"] = my_token
+        # 等待前一個 rerun 迴圈安全讓出控制權（避免切換量表時鏡頭搶鎖）
+        wait_cnt = 0
+        while cam_holder.get("loop_running") and wait_cnt < 15:
+            time.sleep(0.04)
+            wait_cnt += 1
+
         live_session.set_filter_params(ema_alpha_base=live_ema, deadband_deg=live_deadband)
         if record_live and not live_session.is_recording:
             live_session.start_recording()
@@ -701,33 +731,44 @@ with tab_live:
         with col_live_img:
             ph_img = st.empty()
         with col_live_info:
-            ph_card = st.empty()
+            col_lc_rula, col_lc_reba = st.columns(2)
+            with col_lc_rula:
+                ph_card_rula = st.empty()
+            with col_lc_reba:
+                ph_card_reba = st.empty()
             ph_angles = st.empty()
             ph_warn = st.empty()
             ph_chart = st.empty()
 
-        cap = cv2.VideoCapture(int(cam_idx), cv2.CAP_DSHOW) if os.name == "nt" else cv2.VideoCapture(int(cam_idx))
-        if not cap.isOpened():
-            cap = cv2.VideoCapture(int(cam_idx))
+        # 若切換了攝影機編號或尚未開啟，才重新開啟 VideoCapture；切換 RULA/REBA 則直接沿用已開啟的鏡頭
+        cap = cam_holder.get("cap")
+        if cap is None or not cap.isOpened() or cam_holder.get("cam_idx") != int(cam_idx):
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                time.sleep(0.15)
+            cap = cv2.VideoCapture(int(cam_idx), cv2.CAP_DSHOW) if os.name == "nt" else cv2.VideoCapture(int(cam_idx))
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(int(cam_idx))
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cam_holder["cap"] = cap
+                cam_holder["cam_idx"] = int(cam_idx)
 
-        if not cap.isOpened():
+        if cap is None or not cap.isOpened():
+            cam_holder["cap"] = None
             st.error(
                 f"無法開啟攝影機 (Index={int(cam_idx)})。請確認電腦已連接 Webcam、瀏覽器/系統權限已允許，且無其他程式佔用鏡頭。"
             )
         else:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            live_al_theme = {
-                0: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
-                1: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
-                2: {"border": "#F59E0B", "bg": "#FFFBEB", "text": "#78350F", "score": "#B45309"},
-                3: {"border": "#F97316", "bg": "#FFF7ED", "text": "#7C2D12", "score": "#C2410C"},
-                4: {"border": "#EF4444", "bg": "#FEF2F2", "text": "#7F1D1D", "score": "#B91C1C"},
-            }
             fail_reads = 0
             loop_idx = 0
+            cam_holder["loop_running"] = True
             try:
-                while True:
+                while cam_holder.get("active_token") == my_token:
                     ok, frame = cap.read()
                     if not ok:
                         fail_reads += 1
@@ -766,24 +807,26 @@ with tab_live:
                         ang_l = res_live["angles"]
                         diag_l = res_live["diagnostics"]
                         calib_tag = "已校正" if res_live.get("is_calibrated") else "未校正"
-                        rec_tag = f" ｜ 🔴 錄製中 {res_live.get('recorded_duration_sec', 0.0):.1f}s" if res_live.get("is_recording") else ""
+                        rec_tag = f" ｜ 🔴 錄製 {res_live.get('recorded_duration_sec', 0.0):.1f}s" if res_live.get("is_recording") else ""
 
-                        card_rula_html = build_scorecard_html(
-                            f"RULA 即時評估 ｜ FPS: {res_live['fps']:.1f}",
-                            rula_s_l,
-                            rula_al_l,
-                            rula_ass_l["risk_level"],
-                            extra_meta=f"評估側: {diag_l['side_used'].upper()} (L:{diag_l.get('left_rula_score', '-')} R:{diag_l.get('right_rula_score', '-')}) ｜ 基準: {calib_tag}",
+                        ph_card_rula.markdown(
+                            build_scorecard_html(
+                                f"RULA 即時評估 ｜ FPS: {res_live['fps']:.1f}",
+                                rula_s_l,
+                                rula_al_l,
+                                rula_ass_l["risk_level"],
+                                extra_meta=f"評估側: {diag_l['side_used'].upper()} (L:{diag_l.get('left_rula_score', '-')} R:{diag_l.get('right_rula_score', '-')}) ｜ 基準: {calib_tag}",
+                            ),
+                            unsafe_allow_html=True,
                         )
-                        card_reba_html = build_scorecard_html(
-                            f"REBA 即時評估{rec_tag}",
-                            reba_s_l,
-                            reba_al_l,
-                            reba_ass_l["risk_level"],
-                            extra_meta=f"評估側: {diag_l['side_used'].upper()} (L:{diag_l.get('left_reba_score', '-')} R:{diag_l.get('right_reba_score', '-')})",
-                        )
-                        ph_card.markdown(
-                            f'<div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">{card_rula_html}{card_reba_html}</div>',
+                        ph_card_reba.markdown(
+                            build_scorecard_html(
+                                f"REBA 即時評估{rec_tag}",
+                                reba_s_l,
+                                reba_al_l,
+                                reba_ass_l["risk_level"],
+                                extra_meta=f"評估側: {diag_l['side_used'].upper()} (L:{diag_l.get('left_reba_score', '-')} R:{diag_l.get('right_reba_score', '-')})",
+                            ),
                             unsafe_allow_html=True,
                         )
 
@@ -805,26 +848,38 @@ with tab_live:
                         else:
                             ph_warn.empty()
 
-                        if loop_idx % 5 == 0 and len(live_session.rula_score_history) >= 2:
+                        if loop_idx % 15 == 0 and len(live_session.rula_score_history) >= 2:
                             ph_chart.line_chart({
                                 "RULA 即時分數": list(live_session.rula_score_history),
                                 "REBA 即時分數": list(live_session.reba_score_history),
                             })
-
-                        if loop_idx % 10 == 0 and live_session.is_recording and live_session.records:
-                            st.session_state["live_last_summary"] = live_session.get_recording_summary()
                     else:
-                        ph_card.info(f"⏳ 等待人員進入攝影機畫面... (FPS: {res_live['fps']:.1f})")
+                        ph_card_rula.info(f"⏳ 等待人員進入畫面... (FPS: {res_live['fps']:.1f})")
+                        ph_card_reba.empty()
                         ph_angles.empty()
                         ph_warn.empty()
+
+                    # 控制迴圈節奏，保留 WebSocket 與 Streamlit 事件處理喘息空間，避免 WinError 10054 斷線
+                    time.sleep(0.03)
             finally:
-                cap.release()
-                if live_session.is_recording:
-                    if live_session.records:
-                        st.session_state["live_last_summary"] = live_session.stop_recording()
-                    else:
-                        live_session.stop_recording()
+                cam_holder["loop_running"] = False
+                if cam_holder.get("active_token") is None:
+                    # 僅在真正關閉監控時釋放攝影機；切換量表參數時保留連線不中斷
+                    if cam_holder.get("cap") is not None:
+                        try:
+                            cam_holder["cap"].release()
+                        except Exception:
+                            pass
+                        cam_holder["cap"] = None
     else:
+        cam_holder["active_token"] = None
+        if cam_holder.get("cap") is not None:
+            try:
+                cam_holder["cap"].release()
+            except Exception:
+                pass
+            cam_holder["cap"] = None
+
         if live_session.is_recording:
             if live_session.records:
                 st.session_state["live_last_summary"] = live_session.stop_recording()
@@ -854,19 +909,25 @@ with tab_live:
                     x="時間 (秒)",
                     y=["RULA 風險分數", "REBA 風險分數"],
                 )
-                csv_buf_live = io.StringIO()
-                fnames_live = [k for k in live_recs[0].keys() if k != "raw_angles"]
-                writer_live = csv.DictWriter(csv_buf_live, fieldnames=fnames_live, extrasaction="ignore")
-                writer_live.writeheader()
-                for r in live_recs:
-                    writer_live.writerow({k: v for k, v in r.items() if k != "raw_angles"})
-                st.download_button(
-                    label="📥 下載即時動態雙量表逐幀報表 (.CSV)",
-                    data=csv_buf_live.getvalue().encode("utf-8-sig"),
-                    file_name="live_ergo_dual_RULA_REBA.csv",
-                    mime="text/csv",
-                    key="dl_live_csv",
-                )
+                rula_live_csv = rows_to_csv_bytes(build_method_csv_rows(live_recs, "RULA", manual_modifiers))
+                reba_live_csv = rows_to_csv_bytes(build_method_csv_rows(live_recs, "REBA", manual_modifiers))
+                col_lcsv1, col_lcsv2 = st.columns(2)
+                with col_lcsv1:
+                    st.download_button(
+                        label="📥 下載 RULA 逐幀報表 (.CSV)",
+                        data=rula_live_csv,
+                        file_name="live_ergo_RULA.csv",
+                        mime="text/csv",
+                        key="dl_live_csv_rula",
+                    )
+                with col_lcsv2:
+                    st.download_button(
+                        label="📥 下載 REBA 逐幀報表 (.CSV)",
+                        data=reba_live_csv,
+                        file_name="live_ergo_REBA.csv",
+                        mime="text/csv",
+                        key="dl_live_csv_reba",
+                    )
 
             with col_lc_right:
                 st.markdown("#### 🚨 各自最高危害瞬間截圖 (Independent Peak Frames)")
