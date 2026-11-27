@@ -6,10 +6,17 @@
 2. 切換至專案 Conda 虛擬環境：
    conda activate pose
 
-3. 啟動 Streamlit 互動式儀表板：
+3. 啟動模式（二擇一）：
+   【模式 A：網頁儀表板（含照片、影片、即時攝影機、批次驗證）】
    streamlit run app.py
+   啟動後請於瀏覽器開啟：http://localhost:8501
 
-4. 在瀏覽器中開啟：
-   http://localhost:8501
-
-（提示：若要在背景執行或自動開啟，也可直接執行上述指令）
+   【模式 B：獨立全螢幕即時攝影機監控（最高流暢度，適合上台 Live Demo）】
+   python live_ergo_monitor.py
+   常用熱鍵：
+   - M：切換 RULA / REBA
+   - W：切換評估側別 (worst / auto / left / right)
+   - C / X：設為中立姿勢基準校正 / 清除校正
+   - S：開始或停止錄測，結束後自動產出 CSV 與峰值檢核單
+   - Space：立即拍下快照並產出評估單
+   - F / Q：切換全螢幕 / 離開程式

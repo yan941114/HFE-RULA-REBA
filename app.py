@@ -14,6 +14,8 @@ ErgoVision AI - RULA / REBA 人體工學自動風險評估系統 (Web Dashboard)
 5. 人因專題學術驗證：內建加權 Cohen's Kappa 與 MAE 對照分析。
 """
 
+import csv
+import io
 import os
 import sys
 import tempfile
@@ -27,6 +29,7 @@ import streamlit as st
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from src.pose_analyzer import PoseAnalyzer
+from src.live_monitor_core import LiveErgoSession
 from src.rula_reba_engine import (
     calculate_rula,
     calculate_reba,
@@ -234,9 +237,10 @@ manual_modifiers = {
 st.markdown('<div class="main-header">🏋️‍♂️ ErgoVision AI 人體工學自動風險評估系統</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">結合 YOLO11-Pose 骨架偵測與國際標準 RULA / REBA 查表量表 ｜ 人因工程與實驗設計專題</div>', unsafe_allow_html=True)
 
-tab_photo, tab_video, tab_batch = st.tabs([
+tab_photo, tab_video, tab_live, tab_batch = st.tabs([
     "📷 單張照片評估 (Photo Mode)",
     "🎥 影片時序分析與峰值捕捉 (Video Mode)",
+    "📹 即時攝影機偵測 (Live Camera)",
     "📊 專題批次數據與學術驗證 (Batch & Ground Truth)"
 ])
 
@@ -579,7 +583,246 @@ with tab_video:
 
 
 # ==============================================================================
-# Tab 3: 專題批次數據與學術驗證 (Batch & Ground Truth)
+# Tab 3: 即時攝影機動態偵測與自動評分 (Live Camera Mode)
+# ==============================================================================
+with tab_live:
+    st.subheader("即時攝影機動態骨架偵測、基準校正與 RULA / REBA 自動評分")
+    st.info(
+        "💡 支援三層防抖濾波（Median + 自適應 EMA + 死區抑制）與「中立姿勢基準校正」，並即時連動左側邊欄負重／環境參數。"
+        "若於期末專題上台 Live Demo 需要最高流暢度與全螢幕熱鍵控制，也可在終端機執行：`python live_ergo_monitor.py`。"
+    )
+
+    if "live_session" not in st.session_state:
+        st.session_state["live_session"] = LiveErgoSession(analyzer=analyzer)
+    live_session: LiveErgoSession = st.session_state["live_session"]
+
+    col_lc1, col_lc2, col_lc3, col_lc4 = st.columns([1.0, 1.0, 1.2, 1.2])
+    with col_lc1:
+        cam_idx = st.number_input("攝影機編號 (Index)", min_value=0, max_value=5, value=0, step=1, key="live_cam_idx")
+        live_mirror = st.checkbox("鏡像翻轉 (Mirror)", value=True, key="live_mirror_chk")
+    with col_lc2:
+        live_ema = st.slider("EMA 平滑係數", min_value=0.10, max_value=0.80, value=0.30, step=0.05, key="live_ema_slider")
+        live_deadband = st.slider("死區抑制門檻 (°)", min_value=0.0, max_value=5.0, value=1.5, step=0.5, key="live_dead_slider")
+    with col_lc3:
+        run_live = st.toggle("🟢 開啟即時攝影機動態偵測", value=False, key="live_run_toggle")
+        record_live = st.checkbox("🔴 同步錄製並自動捕捉最高危害峰值", value=True, key="live_rec_chk")
+    with col_lc4:
+        if st.button("🎯 設為中立姿勢基準 (校正鏡頭傾角)", key="live_calib_btn"):
+            if live_session.calibrate_baseline():
+                st.success("已成功記錄目前直立姿勢為 0° 基準！")
+            else:
+                st.session_state["live_calib_pending"] = True
+                st.info("已預約校正：將於開啟攝影機偵測到人體後自動歸零基準。")
+        if st.button("🔄 清除基準校正", key="live_clear_calib_btn"):
+            st.session_state["live_calib_pending"] = False
+            live_session.clear_baseline()
+            st.info("已清除基準偏移量。")
+
+    if run_live:
+        live_session.set_filter_params(ema_alpha_base=live_ema, deadband_deg=live_deadband)
+        if record_live and not live_session.is_recording:
+            live_session.start_recording()
+        elif not record_live and live_session.is_recording:
+            if live_session.records:
+                st.session_state["live_last_summary"] = live_session.stop_recording()
+            else:
+                live_session.stop_recording()
+
+        col_live_img, col_live_info = st.columns([1.15, 1.0])
+        with col_live_img:
+            ph_img = st.empty()
+        with col_live_info:
+            ph_card = st.empty()
+            ph_angles = st.empty()
+            ph_warn = st.empty()
+            ph_chart = st.empty()
+
+        cap = cv2.VideoCapture(int(cam_idx), cv2.CAP_DSHOW) if os.name == "nt" else cv2.VideoCapture(int(cam_idx))
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(int(cam_idx))
+
+        if not cap.isOpened():
+            st.error(
+                f"無法開啟攝影機 (Index={int(cam_idx)})。請確認電腦已連接 Webcam、瀏覽器/系統權限已允許，且無其他程式佔用鏡頭。"
+            )
+        else:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            live_al_theme = {
+                0: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
+                1: {"border": "#10B981", "bg": "#ECFDF5", "text": "#065F46", "score": "#047857"},
+                2: {"border": "#F59E0B", "bg": "#FFFBEB", "text": "#78350F", "score": "#B45309"},
+                3: {"border": "#F97316", "bg": "#FFF7ED", "text": "#7C2D12", "score": "#C2410C"},
+                4: {"border": "#EF4444", "bg": "#FEF2F2", "text": "#7F1D1D", "score": "#B91C1C"},
+            }
+            fail_reads = 0
+            loop_idx = 0
+            try:
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        fail_reads += 1
+                        if fail_reads >= 15:
+                            ph_warn.error("攝影機讀取中斷，已自動停止即時偵測。")
+                            break
+                        time.sleep(0.03)
+                        continue
+                    fail_reads = 0
+                    loop_idx += 1
+
+                    res_live = live_session.process_frame(
+                        frame,
+                        method=method,
+                        side=side_choice,
+                        manual_modifiers=manual_modifiers,
+                        mirror=live_mirror,
+                        draw_hud=draw_hud,
+                        show_angle_labels=show_angle_labels,
+                    )
+
+                    if st.session_state.get("live_calib_pending") and res_live.get("detected"):
+                        live_session.calibrate_baseline()
+                        st.session_state["live_calib_pending"] = False
+
+                    img_rgb = cv2.cvtColor(res_live["annotated_image"], cv2.COLOR_BGR2RGB)
+                    ph_img.image(img_rgb, use_container_width=True)
+
+                    if res_live.get("detected"):
+                        ass_l = res_live["assessment_result"]
+                        al_l = res_live["action_level"]
+                        score_l = res_live["score"]
+                        ang_l = res_live["angles"]
+                        diag_l = res_live["diagnostics"]
+                        theme_l = live_al_theme.get(min(4, max(0, al_l)), live_al_theme[1])
+                        calib_tag = "已校正" if res_live.get("is_calibrated") else "未校正"
+                        rec_tag = f" ｜ 🔴 錄製中 {res_live.get('recorded_duration_sec', 0.0):.1f}s" if res_live.get("is_recording") else ""
+
+                        ph_card.markdown(f"""
+                        <div style="background-color: {theme_l['bg']}; border-left: 6px solid {theme_l['border']}; padding: 14px 18px; border-radius: 10px; margin-bottom: 10px;">
+                            <div style="font-size: 0.95rem; font-weight: 700; color: {theme_l['text']};">{method} 即時評估 ｜ FPS: {res_live['fps']:.1f} ｜ 基準: {calib_tag}{rec_tag}</div>
+                            <div style="font-size: 2.3rem; font-weight: 900; color: {theme_l['score']}; line-height: 1.15; margin: 4px 0;">
+                                {score_l} <span style="font-size: 1.1rem; font-weight: 600; color: {theme_l['text']};">分 ｜ 行動水準 AL {al_l}</span>
+                            </div>
+                            <div style="font-size: 1.0rem; font-weight: 700; color: {theme_l['text']};">風險狀態：{ass_l['risk_level']}</div>
+                            <div style="font-size: 0.88rem; color: #374151; margin-top: 4px;">評估側：{diag_l['side_used'].upper()} (左 {diag_l['left_score']} 分 vs 右 {diag_l['right_score']} 分)</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        ph_angles.markdown(
+                            f"**軀幹**: `{ang_l['trunk']:+.1f}°` ｜ **頸部**: `{ang_l['neck']:+.1f}°` ｜ **上臂**: `{ang_l['upper_arm']:+.1f}°`  \n"
+                            f"**前臂**: `{ang_l['lower_arm']:.1f}°` ｜ **手腕**: `{ang_l['wrist']:.1f}°` ｜ **膝關節**: `{ang_l['knee']:.1f}°`"
+                        )
+
+                        warnings_txt = []
+                        if diag_l.get("asymmetry_alert"):
+                            warnings_txt.append(f"⚠️ **身體負荷不對稱警示**：{diag_l.get('asymmetry_reason')}")
+                        if res_live.get("high_risk_streak_sec", 0.0) >= 2.0:
+                            warnings_txt.append(f"🚨 **高危害姿勢持續過久**：已連續維持 AL 3~4 達 **{res_live['high_risk_streak_sec']:.1f} 秒**，請立即調整姿勢！")
+                        if warnings_txt:
+                            ph_warn.warning("  \n".join(warnings_txt))
+                        else:
+                            ph_warn.empty()
+
+                        if loop_idx % 5 == 0 and len(live_session.score_history) >= 2:
+                            ph_chart.line_chart({f"{method} 即時分數": list(live_session.score_history)})
+
+                        if loop_idx % 10 == 0 and live_session.is_recording and live_session.records:
+                            st.session_state["live_last_summary"] = live_session.get_recording_summary()
+                    else:
+                        ph_card.info(f"⏳ 等待人員進入攝影機畫面... (FPS: {res_live['fps']:.1f})")
+                        ph_angles.empty()
+                        ph_warn.empty()
+            finally:
+                cap.release()
+                if live_session.is_recording:
+                    if live_session.records:
+                        st.session_state["live_last_summary"] = live_session.stop_recording()
+                    else:
+                        live_session.stop_recording()
+    else:
+        if live_session.is_recording:
+            if live_session.records:
+                st.session_state["live_last_summary"] = live_session.stop_recording()
+            else:
+                live_session.stop_recording()
+
+        summary = st.session_state.get("live_last_summary")
+        if summary and summary.get("records"):
+            st.markdown("---")
+            st.subheader("📊 最近一次即時動態評估摘要與峰值報告")
+            col_lm1, col_lm2, col_lm3, col_lm4 = st.columns(4)
+            col_lm1.metric("最高危害分數 (Peak)", f"{summary['peak_score']} 分")
+            col_lm2.metric("錄測總時長", f"{summary['duration_sec']:.1f} 秒")
+            col_lm3.metric("平均危害分數", f"{summary['avg_score']:.2f} 分")
+            col_lm4.metric("高危害佔比 (AL 3~4)", f"{summary['high_risk_pct']:.1f}%")
+
+            col_lc_left, col_lc_right = st.columns([1.25, 1.0])
+            with col_lc_left:
+                st.markdown("#### 時序風險變化曲線")
+                live_recs = summary["records"]
+                st.line_chart(
+                    {"時間 (秒)": [r["timestamp_sec"] for r in live_recs], f"{method} 風險分數": [r["score"] for r in live_recs]},
+                    x="時間 (秒)",
+                    y=f"{method} 風險分數",
+                )
+                csv_buf_live = io.StringIO()
+                fnames_live = [k for k in live_recs[0].keys() if k != "raw_angles"]
+                writer_live = csv.DictWriter(csv_buf_live, fieldnames=fnames_live, extrasaction="ignore")
+                writer_live.writeheader()
+                for r in live_recs:
+                    writer_live.writerow({k: v for k, v in r.items() if k != "raw_angles"})
+                st.download_button(
+                    label="📥 下載即時動態逐幀報表 (.CSV)",
+                    data=csv_buf_live.getvalue().encode("utf-8-sig"),
+                    file_name=f"live_ergo_{method}.csv",
+                    mime="text/csv",
+                    key="dl_live_csv",
+                )
+
+            with col_lc_right:
+                st.markdown("#### 🚨 最高危害瞬間截圖 (Peak Frame)")
+                peak_img_l = summary.get("peak_image")
+                peak_ass_l = summary.get("peak_assessment")
+                peak_ang_l = summary.get("peak_angles")
+                if peak_img_l is not None and peak_ass_l is not None and peak_ang_l is not None:
+                    st.image(cv2.cvtColor(peak_img_l, cv2.COLOR_BGR2RGB), use_container_width=True)
+                    peak_al_l = peak_ass_l.get("action_level", 1)
+                    st.markdown(
+                        f"**最高分數**：{summary['peak_score']} 分 (AL {peak_al_l}) ｜ **風險程度**：{peak_ass_l.get('risk_level', '')}"
+                    )
+                    live_what_if = simulate_what_if_improvements(peak_ang_l, manual_modifiers, method=method)
+                    with st.expander("💡 峰值瞬間 AI 改善模擬 (What-If Simulation)", expanded=False):
+                        if live_what_if:
+                            for idx, sc in enumerate(live_what_if, 1):
+                                delta = sc["score_drop"]
+                                badge = f"🔥 總分 -{delta} 分" if delta >= 2 else (f"✨ 總分 -{delta} 分" if delta > 0 else "持平")
+                                st.markdown(f"**{idx}. {sc['category']}** ({badge}): {sc['action']} ➜ 總分降至 **{sc['new_score']} 分** (AL {sc['new_action_level']}) ｜ {sc.get('priority', '')}")
+                        else:
+                            st.info("當前姿勢各項關鍵角度均接近建議中立位，暫無顯著降分改善項目。")
+
+                    live_html_report = generate_html_report(
+                        assessment_result=peak_ass_l,
+                        angles=peak_ang_l,
+                        annotated_bgr=peak_img_l,
+                        method=method,
+                        manual_modifiers=manual_modifiers,
+                        what_if_scenarios=live_what_if,
+                        diagnostics=summary.get("peak_diagnostics"),
+                        item_name=f"LiveSession_{method}",
+                    )
+                    st.download_button(
+                        label="📄 下載即時錄測峰值評估檢核單 (.html / PDF)",
+                        data=live_html_report.encode("utf-8"),
+                        file_name=f"LivePeakReport_{method}.html",
+                        mime="text/html",
+                        key="dl_live_html",
+                    )
+        else:
+            st.info("請在上方開啟「🟢 開啟即時攝影機動態偵測」開始動態評估與自動評分；關閉開關後將自動彙整本次峰值得分與改善報告。")
+
+
+# ==============================================================================
+# Tab 4: 專題批次數據與學術驗證 (Batch & Ground Truth)
 # ==============================================================================
 with tab_batch:
     st.subheader("期末專題研究：自動評估 vs. 人工專家評分 (Ground Truth 驗證)")
