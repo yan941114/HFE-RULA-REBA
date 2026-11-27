@@ -694,7 +694,7 @@ with tab_live:
         live_deadband = st.slider("死區抑制門檻 (°)", min_value=0.0, max_value=5.0, value=1.5, step=0.5, key="live_dead_slider")
     with col_lc3:
         run_live = st.toggle("🟢 開啟即時攝影機動態偵測", value=False, key="live_run_toggle")
-        record_live = st.checkbox("🔴 同步錄製並自動捕捉最高危害峰值", value=True, key="live_rec_chk")
+        record_live = st.checkbox("🔴 同步錄製數據、.mp4 標註影片與峰值截圖", value=True, key="live_rec_chk")
     with col_lc4:
         if st.button("🎯 設為中立姿勢基準 (校正鏡頭傾角)", key="live_calib_btn"):
             if live_session.calibrate_baseline():
@@ -720,7 +720,7 @@ with tab_live:
 
         live_session.set_filter_params(ema_alpha_base=live_ema, deadband_deg=live_deadband)
         if record_live and not live_session.is_recording:
-            live_session.start_recording()
+            live_session.start_recording(save_video=True)
         elif not record_live and live_session.is_recording:
             if live_session.records:
                 st.session_state["live_last_summary"] = live_session.stop_recording()
@@ -927,6 +927,18 @@ with tab_live:
                         file_name="live_ergo_REBA.csv",
                         mime="text/csv",
                         key="dl_live_csv_reba",
+                    )
+
+                live_video_path = summary.get("video_path")
+                if live_video_path and os.path.exists(live_video_path):
+                    with open(live_video_path, "rb") as vf:
+                        video_bytes = vf.read()
+                    st.download_button(
+                        label="🎬 下載即時錄製標註影片 (.MP4)",
+                        data=video_bytes,
+                        file_name="live_ergo_annotated.mp4",
+                        mime="video/mp4",
+                        key="dl_live_mp4",
                     )
 
             with col_lc_right:

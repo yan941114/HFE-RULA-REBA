@@ -124,6 +124,9 @@ class TestLiveErgoMonitor(unittest.TestCase):
         self.assertIn("group_a", summary["peak_reba_assessment"])
         self.assertIsNotNone(summary["peak_rula_image"])
         self.assertIsNotNone(summary["peak_reba_image"])
+        self.assertIsNotNone(summary.get("video_path"))
+        self.assertTrue(os.path.exists(summary["video_path"]))
+        self.assertGreater(os.path.getsize(summary["video_path"]), 0)
 
         snap_paths = session.export_snapshot(
             last_res, self.temp_out_dir, method="RULA", manual_modifiers=modifiers
@@ -142,6 +145,13 @@ class TestLiveErgoMonitor(unittest.TestCase):
         self.assertTrue(os.path.exists(sess_paths["peak_rula_html_path"]))
         self.assertTrue(os.path.exists(sess_paths["peak_reba_jpg_path"]))
         self.assertTrue(os.path.exists(sess_paths["peak_reba_html_path"]))
+        self.assertTrue(os.path.exists(sess_paths["video_path"]))
+        self.assertGreater(os.path.getsize(sess_paths["video_path"]), 0)
+
+        try:
+            os.remove(summary["video_path"])
+        except Exception:
+            pass
 
         with open(sess_paths["rula_csv_path"], "r", encoding="utf-8-sig") as f:
             rula_csv_txt = f.read()

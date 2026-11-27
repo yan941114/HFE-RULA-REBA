@@ -17,7 +17,9 @@ live_monitor_core.py
 
 import csv
 import os
+import shutil
 import sys
+import tempfile
 from collections import deque
 from datetime import datetime
 import time
@@ -129,6 +131,10 @@ class LiveErgoSession:
 
     def _reset_recording_buffers(self) -> None:
         self.is_recording: bool = False
+        self.save_video: bool = True
+        self.max_video_frames: int = 3600
+        self._video_frames_jpg: List[np.ndarray] = []
+        self.recorded_video_path: Optional[str] = None
         self.record_start_ts: float = 0.0
         self.records: List[Dict[str, Any]] = []
         self.recorded_duration_sec: float = 0.0
@@ -199,9 +205,15 @@ class LiveErgoSession:
         self.baseline_offsets = None
         self.reset_filters()
 
-    def start_recording(self) -> None:
-        """開始一段即時作業錄測與 RULA / REBA 雙峰值追蹤。"""
+    def start_recording(self, save_video: bool = True) -> None:
+        """開始一段即時作業錄測與 RULA / REBA 雙峰值追蹤（可選同步錄製 .mp4 標註影片）。"""
+        if self.recorded_video_path and os.path.exists(self.recorded_video_path):
+            try:
+                os.remove(self.recorded_video_path)
+            except Exception:
+                pass
         self._reset_recording_buffers()
+        self.save_video = bool(save_video)
         self.is_recording = True
         self.record_start_ts = time.time()
         self.high_risk_streak_sec = 0.0
@@ -283,12 +295,49 @@ class LiveErgoSession:
             "peak_reba_image": self.peak_reba_image.copy() if self.peak_reba_image is not None else None,
             "reba_high_risk_sec": round(self.recorded_reba_high_risk_sec, 2),
             "reba_high_risk_pct": round((reba_high_frames / total_frames) * 100.0, 1),
+            "video_path": self.recorded_video_path,
             "records": list(self.records),
         }
 
+    def _finalize_video_file(self) -> Optional[str]:
+        """將已緩衝之標註影格寫入實際播放速率之 MP4 暫存檔並釋放記憶體。"""
+        if not self.save_video or not self._video_frames_jpg:
+            self._video_frames_jpg.clear()
+            return None
+
+        first_bgr = cv2.imdecode(self._video_frames_jpg[0], cv2.IMREAD_COLOR)
+        if first_bgr is None:
+            self._video_frames_jpg.clear()
+            return None
+
+        h, w = first_bgr.shape[:2]
+        n_frames = len(self._video_frames_jpg)
+        dur = self.recorded_duration_sec if self.recorded_duration_sec > 0.5 else (n_frames / 12.0)
+        actual_fps = round(max(5.0, min(30.0, n_frames / max(0.5, dur))), 1)
+
+        tf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        vpath = tf.name
+        tf.close()
+
+        writer = cv2.VideoWriter(vpath, cv2.VideoWriter_fourcc(*"mp4v"), actual_fps, (w, h))
+        try:
+            for jpg_buf in self._video_frames_jpg:
+                bgr = cv2.imdecode(jpg_buf, cv2.IMREAD_COLOR)
+                if bgr is not None:
+                    if bgr.shape[1] != w or bgr.shape[0] != h:
+                        bgr = cv2.resize(bgr, (w, h))
+                    writer.write(bgr)
+        finally:
+            writer.release()
+            self._video_frames_jpg.clear()
+
+        self.recorded_video_path = vpath
+        return vpath
+
     def stop_recording(self) -> Dict[str, Any]:
-        """停止錄測並回傳完整雙量表摘要報告資料。"""
+        """停止錄測、寫出 .mp4 標註影片並回傳完整雙量表摘要報告資料。"""
         self.is_recording = False
+        self._finalize_video_file()
         return self.get_recording_summary()
 
     def _stabilize_angles(self, adjusted_angles: Dict[str, float]) -> Dict[str, float]:
@@ -437,6 +486,11 @@ class LiveErgoSession:
                 **flat,
             }
             self.records.append(rec)
+
+            if self.save_video and len(self._video_frames_jpg) < self.max_video_frames:
+                ok_jpg, buf_jpg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                if ok_jpg:
+                    self._video_frames_jpg.append(buf_jpg)
 
             if score > self.peak_score or self.peak_image is None:
                 self.peak_score = score
@@ -622,5 +676,11 @@ class LiveErgoSession:
             outputs["peak_jpg_path"] = outputs[f"peak_{primary_key}_jpg_path"]
         if f"peak_{primary_key}_html_path" in outputs:
             outputs["peak_html_path"] = outputs[f"peak_{primary_key}_html_path"]
+
+        src_video = summary.get("video_path")
+        if src_video and os.path.exists(src_video):
+            dst_video = os.path.join(output_dir, f"{base_name}_annotated.mp4")
+            shutil.copy2(src_video, dst_video)
+            outputs["video_path"] = dst_video
 
         return outputs
